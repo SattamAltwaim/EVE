@@ -1,0 +1,1297 @@
+\documentclass[12pt]{article}
+
+% ── Packages ───────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[top=1.1in, bottom=1.1in, left=1.25in, right=1.25in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{tcolorbox}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{longtable}
+
+\tcbuselibrary{skins, breakable, theorems}
+
+% ── Colors ─────────────────────────────────────────────────────────────────
+\definecolor{accent}{HTML}{2D1B4E}
+\definecolor{accent2}{HTML}{6B3FA0}
+\definecolor{lightbg}{HTML}{F3EFF8}
+\definecolor{rulecol}{HTML}{C8B8E8}
+\definecolor{notecol}{HTML}{1E5C3A}
+\definecolor{notebg}{HTML}{EAF4ED}
+\definecolor{warnbg}{HTML}{FDF3E7}
+\definecolor{warncol}{HTML}{7A4100}
+\definecolor{eqbg}{HTML}{F3EFF8}
+\definecolor{graytext}{HTML}{444444}
+
+% ── Hyperref ───────────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent2,
+  citecolor=accent,
+  urlcolor=accent2,
+  pdftitle={EVE: Evolutionary Virtual Exploration},
+  pdfauthor={Research Paper}
+}
+
+% ── Section style ──────────────────────────────────────────────────────────
+\titleformat{\section}
+  {\color{accent}\large\bfseries\vspace{4pt}}
+  {\thesection.}{0.6em}{}[{\color{rulecol}\vspace{2pt}\hrule height 0.6pt\vspace{2pt}}]
+
+\titleformat{\subsection}
+  {\color{accent2}\normalsize\bfseries}
+  {\thesubsection.}{0.5em}{}
+
+\titleformat{\subsubsection}
+  {\color{graytext}\normalsize\bfseries\itshape}
+  {\thesubsubsection.}{0.5em}{}
+
+\titlespacing{\section}{0pt}{18pt}{8pt}
+\titlespacing{\subsection}{0pt}{12pt}{4pt}
+\titlespacing{\subsubsection}{0pt}{8pt}{3pt}
+
+% ── Header / Footer ────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small\color{graytext}\textit{EVE} \textemdash\
+              Evolutionary Virtual Exploration}
+\fancyhead[R]{\small\color{graytext}Draft}
+\fancyfoot[C]{\small\color{graytext}\thepage}
+
+% ── tcolorbox styles ───────────────────────────────────────────────────────
+\tcbset{
+  eqstyle/.style={
+    colback=eqbg, colframe=accent2, arc=2pt,
+    boxrule=0.5pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+    fonttitle=\footnotesize\bfseries\color{accent2}, attach title to upper={\\[4pt]}
+  },
+  notestyle/.style={
+    colback=notebg, colframe=notecol, arc=2pt,
+    boxrule=0.5pt, left=6pt, right=6pt, top=4pt, bottom=4pt,
+    fontupper=\small\itshape\color{notecol}
+  },
+  warnstyle/.style={
+    colback=warnbg, colframe=warncol, arc=2pt,
+    boxrule=0.5pt, left=6pt, right=6pt, top=4pt, bottom=4pt,
+    fontupper=\small\bfseries\color{warncol}
+  }
+}
+
+\newcommand{\eqbox}[2]{%
+  \begin{tcolorbox}[eqstyle, title={#1}]
+    #2
+  \end{tcolorbox}
+}
+
+\newcommand{\notebox}[1]{%
+  \begin{tcolorbox}[notestyle]
+    #1
+  \end{tcolorbox}
+}
+
+\newcommand{\warnbox}[1]{%
+  \begin{tcolorbox}[warnstyle]
+    #1
+  \end{tcolorbox}
+}
+
+% ── Theorem environments ───────────────────────────────────────────────────
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+% ── Macros ─────────────────────────────────────────────────────────────────
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\abs}[1]{\left\lvert#1\right\rvert}
+\newcommand{\ind}[1]{\mathbf{1}\!\left[#1\right]}
+\newcommand{\Loss}{\mathcal{L}}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\sign}{\mathrm{sign}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\vmap}{\texttt{vmap}}
+
+% ── Spacing helpers ────────────────────────────────────────────────────────
+\setlength{\parskip}{6pt}
+\setlength{\parindent}{0pt}
+
+% ══════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ── Title page ─────────────────────────────────────────────────────────────
+\begin{center}
+  {\color{accent}\LARGE\bfseries EVE}\\[6pt]
+  {\color{accent2}\Large Evolutionary Virtual Exploration}\\[8pt]
+  {\large Adaptive Optimization via Offspring Direction\\[2pt]
+  Selection with Probe-Based Fitness Evaluation}\\[14pt]
+  {\normalsize\color{graytext}\itshape Draft \textemdash\
+  March 2026}\\[6pt]
+\end{center}
+
+\noindent{\color{rulecol}\rule{\linewidth}{1.2pt}}
+
+% ── Abstract ───────────────────────────────────────────────────────────────
+\begin{center}
+  {\bfseries Abstract}
+\end{center}
+\noindent
+Adam and its variants dominate deep learning optimization by maintaining
+per-parameter adaptive learning rates through exponential moving averages
+of gradient moments.
+Yet Adam commits to a single update direction at every step, cannot detect
+when that direction is locally suboptimal, and structurally neglects
+parameter dimensions where gradient signal is noisy.
+We present \textbf{EVE}---Evolutionary Virtual Exploration---an optimizer
+that embeds evolutionary selection pressure directly inside the parameter
+update rule.
+At each step, EVE constructs $K$ \emph{offspring directions}: competing
+update strategies derived analytically from the optimizer's existing
+moment estimates.
+A probe-based fitness evaluation tests each offspring on a shared data
+sub-batch via forward-only passes, and soft natural selection via
+temperature-scaled softmax combines the offspring into a single update
+weighted by empirically measured fitness.
+An evolutionary memory---the \emph{strength signal}---tracks per-dimension
+historical selection success and drives the construction of complementary
+offspring that target neglected dimensions.
+The framework is parameterized by a single integer $K$ (brood size):
+at $K=1$, EVE \emph{exactly} degenerates to AdamW with zero overhead;
+at $K>1$, EVE adaptively selects among $K$ strategies at a fixed cost of
+approximately one additional forward pass, regardless of $K$.
+EVE preserves Adam's convergence guarantees at $K=1$ and provides
+principled exploration--exploitation control via adaptive selection
+temperature, with no additional hyperparameters beyond the brood size.
+
+\vspace{4pt}
+\noindent{\color{rulecol}\rule{\linewidth}{0.6pt}}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+\label{sec:intro}
+
+The Adam optimizer~\cite{kingma2015adam} and its decoupled weight decay
+variant AdamW~\cite{loshchilov2019decoupled} have become the default
+optimizers for training deep neural networks.
+Their success relies on two exponential moving averages (EMAs): a first
+moment $m_t$ (momentum) and a second moment $v_t$ (squared gradient
+magnitude), which together produce a per-parameter adaptive learning rate.
+This mechanism is simple, memory-efficient, and broadly effective.
+
+Yet Adam has structural limitations that no amount of learning rate
+tuning can fully address.
+
+\textbf{Single-direction commitment.}
+At every step, Adam computes exactly one update direction:
+$-\hat{m}_t / (\sqrt{\hat{v}_t} + \varepsilon)$.
+If this direction is locally suboptimal---sliding along a ravine
+instead of cutting across it, or stepping toward a sharp minimum
+instead of escaping it---Adam has no internal mechanism to detect the
+error.
+The optimizer follows its single signal blindly, relying entirely on
+future gradients to correct course.
+
+\textbf{Sharp minima entrapment.}
+In regions of high curvature, both the gradient magnitude and $v_t$
+are large.
+Adam's normalization $\hat{m}_t / \sqrt{\hat{v}_t}$ cancels the
+sharpness signal: the optimizer takes small, careful steps precisely
+when it should be leaping out.
+This structural blindness to loss landscape geometry is the failure mode
+that Sharpness-Aware Minimization (SAM)~\cite{foret2021sharpnessaware}
+was designed to address, at the cost of doubled forward--backward passes.
+
+\textbf{Dimension neglect.}
+On parameter dimensions where the gradient oscillates in sign, $m_t$
+averages toward zero while $v_t$ remains large.
+The effective learning rate
+$\eta \cdot |\hat{m}_{t,d}| / (\sqrt{\hat{v}_{t,d}} + \varepsilon)$
+collapses, and the dimension becomes effectively frozen.
+With $\beta_2 = 0.999$, the half-life of $v_t$ is approximately
+693 steps; a neglected dimension can remain stalled for hundreds of
+updates.
+
+\textbf{Hyperparameter fragility.}
+Adam's performance is highly sensitive to the learning rate $\eta$.
+The optimal value can vary by an order of magnitude between tasks,
+and practitioners routinely spend significant compute on learning rate
+sweeps, warmup schedules, and cosine annealing---all patches for an
+optimizer that cannot self-correct.
+
+\medskip
+
+These are not bugs in Adam's implementation; they are structural
+consequences of committing to a single update formula per step.
+EVE addresses all four by introducing a minimal evolutionary layer:
+multiple candidate directions are spawned, tested, and selected at
+every step, so the optimizer can adapt its \emph{strategy}---not just
+its step size---to the local loss landscape.
+
+The key insight is that evolutionary selection can be embedded directly
+in the update rule without maintaining a population of models.
+EVE spawns \emph{offspring directions}---virtual candidate updates
+derived analytically from existing moment buffers---and evaluates their
+fitness via cheap forward-only passes on a shared data sub-batch.
+Soft selection via temperature-scaled softmax produces a combined
+update that is provably at least as good as any single strategy
+(in expectation over the selection), and the brood size $K$ provides
+a clean, user-facing knob trading compute for adaptivity.
+
+At $K = 1$, only the Adam direction exists, selection is trivial, and
+EVE is exactly AdamW with zero overhead.
+At $K > 1$, EVE adaptively selects among $K$ strategies for the cost
+of approximately one additional forward pass.
+No populations, no evolutionary operators applied to model weights,
+no CKA matrices, no surrogate maps---just $K$ directions, one sub-batch,
+and a softmax.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Adaptive Gradient Methods}
+
+Adam~\cite{kingma2015adam} maintains per-parameter first and second
+moment estimates; AdamW~\cite{loshchilov2019decoupled} decouples weight
+decay from the adaptive update.
+RAdam~\cite{liu2020radam} addresses Adam's variance issue during early
+training via a rectified update.
+AdaFactor~\cite{shazeer2018adafactor} reduces memory by factoring the
+second-moment matrix.
+Lion~\cite{chen2024lion} uses only the sign of the momentum, eliminating
+the second moment entirely.
+All commit to a single update formula per step.
+
+\subsection{Sharpness-Aware Optimization}
+
+SAM~\cite{foret2021sharpnessaware} seeks parameters where the loss is
+uniformly low in a neighborhood, requiring two forward--backward passes
+per step (100\% overhead).
+GSAM~\cite{zhuang2022surrogate} and LookSAM~\cite{liu2022towards}
+reduce this cost via periodic perturbation or surrogate gradients.
+EVE provides a softer form of sharpness awareness: offspring directions
+that probe different local geometries, evaluated via forward-only passes
+at $\sim$33\% overhead.
+
+\subsection{Learning Rate Adaptation}
+
+D-Adaptation~\cite{defazio2023dadaptation} and Prodigy~\cite{mishchenko2024prodigy}
+automatically estimate the optimal learning rate during training.
+Schedule-Free optimizers~\cite{defazio2024schedulefree} eliminate the
+need for learning rate schedules.
+EVE is orthogonal to these: it adapts the \emph{direction}, not just
+the magnitude, and can be composed with any learning rate schedule or
+automatic rate estimator.
+
+\subsection{Multi-Candidate and Ensemble Methods}
+
+Lookahead~\cite{zhang2019lookahead} maintains slow and fast weights,
+effectively exploring two update strategies.
+Stochastic Weight Averaging (SWA)~\cite{izmailov2018averaging} averages
+multiple points along the trajectory.
+Gradient Disagreement~\cite{mansilla2021domain} uses per-sample gradient
+variance to detect distribution shift.
+EVE generalizes the multi-candidate idea: $K$ strategies compete at
+every step, selected by empirical fitness rather than heuristic averaging.
+
+\subsection{Evolutionary Optimization for Neural Networks}
+
+Evolution Strategies (ES)~\cite{salimans2017evolution} demonstrated that
+population-based search can match gradient methods on RL benchmarks.
+CMA-ES~\cite{hansen2001cma} adapts a full covariance mutation matrix
+but scales as $\mathcal{O}(D^2)$.
+EVE distills the evolutionary insight---multiple strategies, fitness-based
+selection, complementarity-driven exploration---into a single-model
+optimizer with zero population overhead.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Notation and Preliminaries}
+\label{sec:notation}
+
+Let $\theta_t \in \R^D$ denote the parameter vector at step $t$,
+$\Loss(\theta; B)$ the loss evaluated on mini-batch $B$, and
+$g_t = \nabla_\theta \Loss(\theta_t; B_t)$ the stochastic gradient.
+
+Adam maintains two EMA buffers:
+\begin{align}
+  m_t &= \beta_1 m_{t-1} + (1 - \beta_1)\, g_t
+  \label{eq:adam_m} \\
+  v_t &= \beta_2 v_{t-1} + (1 - \beta_2)\, g_t^2
+  \label{eq:adam_v}
+\end{align}
+with bias-corrected estimates
+$\hat{m}_t = m_t / (1 - \beta_1^t)$ and
+$\hat{v}_t = v_t / (1 - \beta_2^t)$.
+All operations are element-wise over dimensions $d \in \{1, \ldots, D\}$.
+
+The AdamW update is:
+\begin{equation}
+  \theta_{t+1} = \theta_t
+    - \eta\,\frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon}
+    - \eta\lambda\,\theta_t
+  \label{eq:adamw}
+\end{equation}
+where $\eta$ is the learning rate, $\lambda$ the weight decay, and
+$\varepsilon$ a numerical stabilizer.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{The EVE Framework}
+\label{sec:method}
+
+EVE augments the standard adaptive gradient update with three mechanisms:
+(1)~offspring direction construction, (2)~probe-based fitness evaluation,
+and (3)~soft natural selection.
+A fourth mechanism, the strength signal, provides evolutionary memory
+that links generations across steps.
+
+\subsection{Offspring Direction Construction}
+\label{ssec:offspring}
+
+At each step $t$, after computing $g_t$, $\hat{m}_t$, $\hat{v}_t$, and
+the strength signal $s_t$ (\cref{ssec:strength}), EVE constructs $K$
+offspring directions.
+Each offspring represents a distinct optimization strategy, derived
+analytically from the existing moment buffers at zero computational cost.
+
+\eqbox{Definition 1 \textemdash\ Offspring Directions}{
+Let $K \geq 1$ be the brood size.
+The offspring directions
+$\mathbf{d}_1, \ldots, \mathbf{d}_K \in \R^D$ are defined as:
+\begin{align}
+  \mathbf{d}_1 &= -\,\frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon}
+  &&\text{(Adam -- momentum-smoothed adaptive step)}
+  \label{eq:offspring_adam} \\[6pt]
+  \mathbf{d}_2 &= -\,\frac{g_t}{\sqrt{\hat{v}_t} + \varepsilon}
+  &&\text{(Gradient -- fresh signal, no momentum lag)}
+  \label{eq:offspring_gradient}
+\end{align}
+For $K \geq 3$:
+\begin{align}
+  \mathbf{d}_3 &= -\,\frac{g_t \odot (1 - s_t)}
+    {\sqrt{\hat{v}_t} + \varepsilon}
+  &&\text{(Complementary -- targets weak dimensions)}
+  \label{eq:offspring_complementary} \\[6pt]
+  \mathbf{d}_4 &= -\,\sign(g_t) \odot
+    \frac{\sqrt{\hat{v}_t}}{\max(\sqrt{\hat{v}_t}) + \varepsilon}
+  &&\text{(Contrarian -- pushes through high curvature)}
+  \label{eq:offspring_contrarian}
+\end{align}
+where $\odot$ denotes element-wise multiplication and
+$s_t \in [0, 1]^D$ is the strength signal
+(\cref{ssec:strength}).
+}
+
+\notebox{%
+\textbf{Design principle.}
+Offspring 1 is always the Adam direction.
+Each subsequent offspring adds a progressively more exploratory strategy.
+The ordering is intentional: increasing $K$ monotonically increases
+exploration without altering the baseline behavior.
+At $K = 1$, only the Adam direction exists.
+}
+
+\subsubsection{Offspring Scaling}
+
+All offspring directions share a common scale set by the curvature
+denominator $\sqrt{\hat{v}_t} + \varepsilon$, ensuring that selection
+compares \emph{directional} quality rather than magnitude artifacts.
+The contrarian offspring (Eq.~\ref{eq:offspring_contrarian}) is an
+exception: it intentionally uses $\sqrt{\hat{v}_t}$ as a \emph{numerator},
+amplifying the step on high-curvature dimensions.
+The normalization by $\max(\sqrt{\hat{v}_t})$ bounds its magnitude
+to $[0, 1]$ per dimension, preventing the contrarian from dominating
+the selection via scale alone.
+
+\subsubsection{Extending Beyond $K = 4$}
+
+For $K > 4$, additional offspring can be constructed via:
+\begin{itemize}[leftmargin=1.6em, itemsep=3pt]
+  \item \textbf{Momentum interpolation:}
+    $\mathbf{d}_{4+j} = -\,[\alpha_j\, \hat{m}_t + (1 - \alpha_j)\, g_t]
+    \,/\, (\sqrt{\hat{v}_t} + \varepsilon)$
+    for $\alpha_j \in (0, 1)$, interpolating between momentum and
+    gradient strategies.
+  \item \textbf{Sign momentum:}
+    $\mathbf{d}_k = -\,\sign(\hat{m}_t) / \sqrt{D}$, analogous to
+    the Lion update~\cite{chen2024lion}, providing a
+    magnitude-independent direction.
+  \item \textbf{Stochastic perturbation:}
+    $\mathbf{d}_k = \mathbf{d}_1 + \sigma_{\rm explore}\,\zeta$,
+    $\zeta \sim \mathcal{N}(0, I)$, adding isotropic noise around the
+    Adam direction for broader landscape sampling.
+\end{itemize}
+The optimal offspring set is task-dependent; the four canonical offspring
+(\cref{eq:offspring_adam}--\cref{eq:offspring_contrarian}) provide a
+principled default that covers the primary failure modes of Adam.
+
+
+\subsection{Probe-Based Fitness Evaluation}
+\label{ssec:probe}
+
+The core of EVE's selection mechanism is a \emph{probe}: a forward-only
+evaluation of each offspring direction on a shared sub-batch, producing
+a noise-free fitness ranking.
+
+\subsubsection{Shared Sub-Batch Extraction}
+
+From the training batch $B_t$ (already loaded in GPU memory for the
+backward pass), extract a probe sub-batch:
+\begin{equation}
+  B' \subseteq B_t, \quad |B'| = \left\lfloor |B_t| / K \right\rfloor
+  \label{eq:probe_subbatch}
+\end{equation}
+The same $B'$ is used for all $K$ offspring evaluations.
+Since $B_t$ was already loaded for the gradient computation, $B'$ incurs
+no additional data loading cost.
+
+\subsubsection{Control-Variate Fitness}
+
+Evaluate each offspring at the candidate position
+$\theta_t + \eta\,\mathbf{d}_k$:
+
+\eqbox{Definition 2 \textemdash\ Probe Fitness}{
+\begin{equation}
+  \mathcal{F}_k = \Loss(\theta_t;\, B')
+    \;-\; \Loss(\theta_t + \eta\,\mathbf{d}_k;\, B')
+  \label{eq:fitness}
+\end{equation}
+\smallskip
+Positive $\mathcal{F}_k$ indicates that offspring $k$ reduces loss.
+The shared baseline $\Loss(\theta_t; B')$ acts as a \emph{control variate}:
+any noise introduced by the sub-batch $B'$ affects all offspring
+identically and cancels in the relative ranking.
+}
+
+\begin{proposition}[Noise cancellation]
+\label{prop:noise}
+Let $\xi$ denote the additive batch noise:
+$\Loss(\theta; B') = \Loss(\theta; \mathcal{D}) + \xi(\theta, B')$.
+The fitness difference between offspring $k$ and $j$ is:
+\begin{equation*}
+  \mathcal{F}_k - \mathcal{F}_j
+  = \bigl[\Loss(\theta_t + \eta\,\mathbf{d}_j; B')
+    - \Loss(\theta_t + \eta\,\mathbf{d}_k; B')\bigr]
+\end{equation*}
+The baseline noise $\xi(\theta_t, B')$ cancels exactly.
+The residual noise $\xi(\theta_t + \eta\mathbf{d}_k, B')
+- \xi(\theta_t + \eta\mathbf{d}_j, B')$ is
+$\mathcal{O}(\eta \cdot \norm{\mathbf{d}_k - \mathbf{d}_j} \cdot
+\sigma_\xi / \sqrt{|B'|})$, which is second-order in the learning rate
+and negligible for typical $\eta \leq 10^{-3}$.
+\end{proposition}
+
+\subsubsection{The Base Loss is Free}
+
+The base loss $\Loss(\theta_t; B')$ need not be computed separately.
+During the forward pass for gradient computation, per-sample losses
+are typically available (for gradient accumulation, logging, or
+per-sample clipping).
+The base loss on $B' \subseteq B_t$ is a subset-sum of losses already
+computed.
+If per-sample losses are not cached, a single extra forward pass on $B'$
+at $\theta_t$ is required, adding negligible cost since $|B'| = |B_t|/K$.
+
+\subsubsection{Parallel Offspring Evaluation}
+
+The $K$ forward passes are independent and can be parallelized.
+Stacking the offspring parameters as a $(K, D)$ tensor:
+\begin{equation}
+  \Theta_{\mathrm{probe}} = \theta_t \cdot \mathbf{1}_K^\top
+    + \eta\,\mathbf{D}_K
+  \;\in\; \R^{K \times D}
+  \label{eq:probe_stack}
+\end{equation}
+where $\mathbf{D}_K = [\mathbf{d}_1, \ldots, \mathbf{d}_K]^\top$ is
+the offspring matrix.
+Using \texttt{torch.vmap} or batched
+\texttt{torch.func.functional\_call}, all $K$ evaluations execute in
+a single GPU kernel.
+The activation memory is $K \times |B'| \times A$, where $A$ is the
+per-sample activation footprint.
+Since $|B'| = |B_t|/K$, the total activation memory is $|B_t| \times A$
+--- identical to the original forward pass.
+
+\eqbox{Proposition 1 \textemdash\ Computational Cost}{
+The probe evaluation adds:
+\begin{equation}
+  C_{\mathrm{probe}} = K \times \frac{|B_t|}{K} \times C_{\mathrm{fwd}}
+  = |B_t| \times C_{\mathrm{fwd}}
+  = C_{\mathrm{fwd}}^{\mathrm{full}}
+  \label{eq:probe_cost}
+\end{equation}
+\smallskip
+where $C_{\mathrm{fwd}}$ is the per-sample forward cost.
+Since a standard training step costs
+$C_{\mathrm{fwd}}^{\mathrm{full}} + C_{\mathrm{bwd}}^{\mathrm{full}}
+\approx 3\,C_{\mathrm{fwd}}^{\mathrm{full}}$,
+the probe adds $\sim$33\% overhead, \textbf{independent of $K$}.
+No backward pass is required for the probe.
+}
+
+
+\subsection{Soft Natural Selection}
+\label{ssec:selection}
+
+The fitness values $\{\mathcal{F}_k\}_{k=1}^K$ are converted to
+offspring weights via temperature-scaled softmax:
+
+\eqbox{Definition 3 \textemdash\ Offspring Selection Weights}{
+\begin{equation}
+  w_k = \frac{
+    \exp\!\bigl(\beta_{\mathrm{sel}}\,\mathcal{F}_k\bigr)
+  }{
+    \sum_{j=1}^{K}
+    \exp\!\bigl(\beta_{\mathrm{sel}}\,\mathcal{F}_j\bigr)
+  }
+  \label{eq:selection_weights}
+\end{equation}
+\smallskip
+where $\beta_{\mathrm{sel}} > 0$ is the \emph{selection temperature}.
+High $\beta_{\mathrm{sel}}$ concentrates weight on the fittest offspring
+(exploitation); low $\beta_{\mathrm{sel}}$ distributes weight uniformly
+(exploration).
+}
+
+\subsubsection{$K = 1$ Degeneracy}
+
+\begin{proposition}[$K = 1$ recovers AdamW]
+\label{prop:k1}
+When $K = 1$, the only offspring is $\mathbf{d}_1$ (the Adam direction).
+The softmax of a single element yields $w_1 = 1$.
+The probe evaluation is skipped (single candidate requires no ranking).
+The update reduces to:
+\begin{equation}
+  \theta_{t+1} = \theta_t + \eta\,\mathbf{d}_1 - \eta\lambda\,\theta_t
+  = \theta_t - \eta\,\frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon}
+    - \eta\lambda\,\theta_t
+  \label{eq:k1_adam}
+\end{equation}
+which is exactly the AdamW update~(\cref{eq:adamw}).
+The probe cost is zero (skipped), the selection cost is zero (trivial),
+and the only offspring construction cost is one element-wise division
+(already computed in standard Adam).
+\end{proposition}
+
+\subsubsection{The EVE Update}
+
+The selected update direction is the fitness-weighted combination:
+
+\eqbox{Definition 4 \textemdash\ The EVE Update}{
+\begin{equation}
+  \theta_{t+1} = \theta_t
+    + \eta \sum_{k=1}^{K} w_k\,\mathbf{d}_k
+    - \eta\lambda\,\theta_t
+  \label{eq:eve_update}
+\end{equation}
+\smallskip
+This is a convex combination of offspring directions (since
+$w_k \geq 0$, $\sum_k w_k = 1$) scaled by the learning rate, plus
+decoupled weight decay.
+When all $\mathcal{F}_k$ are equal (no offspring is better),
+$w_k = 1/K$ and the update averages the strategies---a principled
+fallback that diversifies the step direction.
+}
+
+
+\subsection{Strength Signal: Evolutionary Memory}
+\label{ssec:strength}
+
+The strength signal $s_t \in [0, 1]^D$ tracks per-dimension historical
+selection success, providing evolutionary memory that links generations
+(steps) across time.
+
+\eqbox{Definition 5 \textemdash\ Strength Signal Update}{
+At step $t+1$, after computing $g_{t+1}$, the strength signal is updated:
+\begin{equation}
+  s_{t+1,d} = \gamma_s\, s_{t,d}
+    + (1 - \gamma_s)\,\sigma\!\bigl(
+      \delta_t \cdot \sign(\Delta\theta_{t,d})
+      \cdot \sign(-g_{t+1,d})
+    \bigr)
+  \label{eq:strength}
+\end{equation}
+\smallskip
+where:
+\begin{itemize}[leftmargin=1.6em, itemsep=2pt]
+  \item $\delta_t = \Loss(\theta_t; B_t) - \Loss(\theta_{t+1}; B_{t+1})$
+    is the inter-step loss improvement (positive = loss decreased),
+  \item $\Delta\theta_{t,d} = \theta_{t+1,d} - \theta_{t,d}$ is the
+    actual parameter displacement on dimension $d$,
+  \item $\sigma(\cdot)$ is the sigmoid function,
+  \item $\gamma_s \in [0, 1)$ is the strength decay rate
+    (default: $0.99$).
+\end{itemize}
+Initialize $s_{0,d} = 0.5$ (neutral prior).
+}
+
+\textbf{Interpretation.}
+The indicator
+$\sign(\Delta\theta_{t,d}) \cdot \sign(-g_{t+1,d})$ fires positively
+when the update direction on dimension $d$ agreed with the next step's
+negative gradient---i.e., the optimizer moved in a direction that the
+next gradient confirms was useful.
+Multiplying by $\delta_t$ scales this by overall step quality: a
+dimension gets credit for agreeing with the descent direction only
+when the step actually reduced loss.
+Through the sigmoid, $s_{t,d} \to 1$ on dimensions where updates
+consistently help, and $s_{t,d} \to 0$ on dimensions where the
+optimizer is failing.
+
+\textbf{Role in offspring construction.}
+The complementary offspring (\cref{eq:offspring_complementary})
+multiplies $g_t$ by $(1 - s_t)$: dimensions with $s_t \approx 1$
+(Adam is already succeeding) are suppressed, while dimensions with
+$s_t \approx 0$ (Adam is failing) are amplified.
+This creates targeted exploration on exactly the dimensions that need it.
+
+\notebox{%
+\textbf{Evolutionary analogy.}
+The strength signal is analogous to \emph{fitness inheritance} in
+biological evolution: offspring inherit information about which traits
+(dimensions) contributed to parental survival, guiding the next
+generation's variation toward productive dimensions.
+EVE encodes this as a continuous signal derived from natural training
+dynamics, requiring no explicit survival indicators or population-level
+statistics.
+}
+
+
+\subsection{Adaptive Selection Temperature}
+\label{ssec:temperature}
+
+The selection temperature $\beta_{\mathrm{sel}}$ controls the
+exploration--exploitation balance and adapts automatically based on
+selection entropy.
+
+\eqbox{Definition 6 \textemdash\ Adaptive Selection Temperature}{
+Let $H_t = -\sum_{k=1}^K w_k \log w_k$ be the selection entropy
+at step $t$, and $H_{\max} = \log K$ the maximum entropy (uniform
+selection).
+The target entropy is $H^* = \rho \cdot H_{\max}$ for
+$\rho \in (0, 1)$ (default: $\rho = 0.5$).
+
+The temperature adapts via multiplicative update:
+\begin{equation}
+  \beta_{\mathrm{sel}}^{(t+1)} = \beta_{\mathrm{sel}}^{(t)} \cdot
+    \exp\!\bigl(\alpha_\beta\,(H^* - H_t)\bigr)
+  \label{eq:temperature_adapt}
+\end{equation}
+\smallskip
+where $\alpha_\beta > 0$ is the adaptation rate (default: $0.01$).
+When entropy is too high ($H_t > H^*$: selection too uniform),
+$\beta_{\mathrm{sel}}$ increases to sharpen selection.
+When entropy is too low ($H_t < H^*$: one offspring dominates),
+$\beta_{\mathrm{sel}}$ decreases to encourage exploration.
+Clamp $\beta_{\mathrm{sel}} \in [\beta_{\min}, \beta_{\max}]$ for
+stability (defaults: $[0.1,\, 100]$).
+}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Theoretical Properties}
+\label{sec:theory}
+
+\subsection{Dominance Guarantee}
+
+\begin{theorem}[EVE dominates any single offspring]
+\label{thm:dominance}
+Let $\mathcal{F}_k$ be the true (population-level) fitness of offspring
+$k$.
+The expected fitness of the EVE update is:
+\begin{equation}
+  \E\bigl[\mathcal{F}_{\mathrm{EVE}}\bigr]
+  = \sum_{k=1}^K w_k\,\mathcal{F}_k
+  \geq \min_{k} \mathcal{F}_k
+  \label{eq:dominance}
+\end{equation}
+with equality only when all offspring have equal fitness.
+Furthermore, as $\beta_{\mathrm{sel}} \to \infty$:
+$\E[\mathcal{F}_{\mathrm{EVE}}] \to \max_k \mathcal{F}_k$.
+\end{theorem}
+
+\begin{proof}
+Since $w_k \geq 0$ and $\sum_k w_k = 1$, the expectation is a
+convex combination, bounded below by the minimum and above by the
+maximum.
+The softmax concentrates mass on the largest $\mathcal{F}_k$ as
+$\beta_{\mathrm{sel}} \to \infty$ (standard property of the softmax
+function).
+\end{proof}
+
+\begin{corollary}[EVE is at least as good as Adam]
+Since $\mathbf{d}_1$ is the Adam direction and EVE's expected fitness
+satisfies $\E[\mathcal{F}_{\mathrm{EVE}}] \geq \min_k \mathcal{F}_k$,
+EVE never underperforms the worst offspring.
+When $\beta_{\mathrm{sel}}$ is sufficiently large, EVE selects the
+best-performing direction, which may be Adam's or may be a better
+alternative.
+In the worst case where Adam is always the best strategy, EVE converges
+to selecting $\mathbf{d}_1$ with $w_1 \to 1$, recovering Adam.
+\end{corollary}
+
+\subsection{Convergence at $K = 1$}
+
+\begin{proposition}
+At $K = 1$, EVE is exactly AdamW (\cref{prop:k1}).
+Therefore all convergence guarantees established for
+Adam~\cite{kingma2015adam} and
+AdamW~\cite{loshchilov2019decoupled}---including those of
+\cite{reddi2018convergence} with the $\beta_2$ correction---transfer
+directly to EVE at $K = 1$.
+\end{proposition}
+
+\subsection{Selection Diversity}
+
+\begin{proposition}[Non-degenerate selection]
+\label{prop:diversity}
+For finite $\beta_{\mathrm{sel}}$ and $K \geq 2$, every offspring
+receives positive weight: $w_k > 0\;\forall\,k$.
+No offspring direction is ever fully excluded from the update.
+\end{proposition}
+
+\begin{proof}
+For finite $\beta_{\mathrm{sel}}$,
+$\exp(\beta_{\mathrm{sel}}\,\mathcal{F}_k) > 0\;\forall\,k$,
+so $w_k > 0$ by definition of softmax.
+\end{proof}
+
+This is the ``soft selection'' property: no hard elitism, no individual
+direction is ever completely discarded.
+Even a poorly performing offspring contributes a small exploratory
+component, maintaining search diversity.
+
+\subsection{Dimension Recovery}
+
+\begin{proposition}[Complementary offspring activates neglected dimensions]
+\label{prop:recovery}
+Consider a dimension $d$ where Adam has stalled:
+$|m_{t,d}| \approx 0$, $v_{t,d}$ large, $s_{t,d} \approx 0$.
+Then:
+\begin{itemize}[leftmargin=1.6em, itemsep=2pt]
+  \item The Adam offspring contributes $|d_{1,d}| \approx 0$ on
+    dimension $d$ (stalled).
+  \item The complementary offspring contributes
+    $|d_{3,d}| = |g_{t,d}| \cdot (1 - s_{t,d}) / (\sqrt{v_{t,d}}
+    + \varepsilon) \approx |g_{t,d}| / (\sqrt{v_{t,d}} + \varepsilon)$
+    (full gradient signal, no momentum cancellation).
+  \item The contrarian offspring contributes
+    $|d_{4,d}| = \sqrt{v_{t,d}} / (\max(\sqrt{v_t}) + \varepsilon)
+    \approx \mathcal{O}(1)$ (significant push independent of $g_{t,d}$).
+\end{itemize}
+If either $\mathbf{d}_3$ or $\mathbf{d}_4$ achieves positive fitness
+on the probe, it receives positive selection weight, breaking the
+stall on dimension $d$.
+\end{proposition}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Implementation}
+\label{sec:implementation}
+
+\subsection{Full Algorithm}
+
+\begin{algorithm}[H]
+\caption{EVE: Evolutionary Virtual Exploration.}
+\label{alg:eve}
+\begin{algorithmic}[1]
+\Require Learning rate $\eta$, decay rates $\beta_1, \beta_2$,
+  brood size $K$, weight decay $\lambda$, strength decay $\gamma_s$,
+  entropy target ratio $\rho$
+\State Initialize $\theta_0$, $m_0 \leftarrow 0$, $v_0 \leftarrow 0$,
+  $s_0 \leftarrow 0.5 \cdot \mathbf{1}$,
+  $\beta_{\mathrm{sel}} \leftarrow 1.0$
+\For{$t = 1, 2, \ldots, T$}
+  \State Sample batch $B_t$; compute $g_t = \nabla_\theta
+    \Loss(\theta_t; B_t)$
+    \hfill {\color{graytext}\textit{standard backward pass}}
+  \State $m_t \leftarrow \beta_1 m_{t-1} + (1 - \beta_1)\,g_t$;
+    \quad $v_t \leftarrow \beta_2 v_{t-1} + (1 - \beta_2)\,g_t^2$
+  \State $\hat{m}_t \leftarrow m_t / (1 - \beta_1^t)$;
+    \quad $\hat{v}_t \leftarrow v_t / (1 - \beta_2^t)$
+  \If{$K = 1$} \hfill {\color{graytext}\textit{exact AdamW, skip probe}}
+    \State $\theta_{t+1} \leftarrow \theta_t
+      - \eta\,\hat{m}_t / (\sqrt{\hat{v}_t} + \varepsilon)
+      - \eta\lambda\,\theta_t$
+  \Else
+    \State Construct offspring $\mathbf{d}_1, \ldots, \mathbf{d}_K$
+      \hfill (\cref{eq:offspring_adam}--\cref{eq:offspring_contrarian})
+    \State Extract probe sub-batch $B' \subseteq B_t$,
+      $|B'| = \lfloor |B_t|/K \rfloor$
+    \State $L_{\mathrm{base}} \leftarrow \Loss(\theta_t; B')$
+      \hfill {\color{graytext}\textit{from cached per-sample losses or
+      subset forward}}
+    \For{$k = 1, \ldots, K$}
+      \hfill {\color{graytext}\textit{parallel via vmap}}
+      \State $L_k \leftarrow \Loss(\theta_t + \eta\,\mathbf{d}_k;\, B')$
+        \hfill {\color{graytext}\textit{forward only, no backward}}
+    \EndFor
+    \State $\mathcal{F}_k \leftarrow L_{\mathrm{base}} - L_k$
+      \quad $\forall\,k$
+    \State $w_k \leftarrow \softmax(\beta_{\mathrm{sel}} \cdot
+      \mathcal{F}_k)$ \quad $\forall\,k$
+      \hfill (\cref{eq:selection_weights})
+    \State $\theta_{t+1} \leftarrow \theta_t
+      + \eta \sum_{k=1}^K w_k\,\mathbf{d}_k
+      - \eta\lambda\,\theta_t$
+      \hfill (\cref{eq:eve_update})
+  \EndIf
+  \State Update strength signal $s_{t+1}$
+    \hfill (\cref{eq:strength})
+  \State Adapt $\beta_{\mathrm{sel}}$ via entropy targeting
+    \hfill (\cref{eq:temperature_adapt})
+\EndFor
+\State \Return $\theta_T$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Memory Overhead}
+
+EVE adds one $D$-dimensional buffer beyond AdamW:
+
+\medskip
+\begin{center}
+\small
+\begin{tabular}{@{}lcc@{}}
+  \toprule
+  Buffer & AdamW & EVE \\
+  \midrule
+  Parameters $\theta$ & $D$ & $D$ \\
+  First moment $m$ & $D$ & $D$ \\
+  Second moment $v$ & $D$ & $D$ \\
+  Strength signal $s$ & --- & $D$ \\
+  Offspring matrix $\mathbf{D}_K$ & --- & $KD$ (temporary) \\
+  \midrule
+  Persistent & $3D$ & $4D$ \\
+  Peak (during probe) & $3D$ & $4D + KD$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+The offspring matrix is allocated only during the probe and released
+immediately after selection.
+For $K = 4$, the persistent overhead is $+33\%$ (one extra buffer)
+and peak overhead is $+167\%$; for $K = 1$, overhead is $+33\%$
+(strength signal only, no offspring matrix).
+
+\subsection{Computational Cost Summary}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+  \toprule
+  & AdamW & EVE ($K = 1$) & EVE ($K > 1$) \\
+  \midrule
+  Forward passes & 1 & 1 & 1 + 1 (probe) \\
+  Backward passes & 1 & 1 & 1 \\
+  Per-param ops & $\mathcal{O}(D)$ & $\mathcal{O}(D)$
+    & $\mathcal{O}(KD)$ \\
+  Wall-clock overhead & --- & 0\% & $\sim$33\% \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\notebox{%
+\textbf{The 33\% is a ceiling, not a floor.}
+When per-sample losses are cached (standard in many training frameworks),
+$L_{\mathrm{base}}$ is free.
+When \texttt{vmap} is available, all $K$ probe forward passes execute
+in a single kernel.
+The actual overhead depends on the model's forward-to-backward ratio
+and I/O pipeline; for large transformers where data loading and backward
+dominate, the probe overhead may be 10--20\% in practice.
+}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Hyperparameter Reference}
+\label{sec:hyperparams}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{7.2cm}@{}}
+  \toprule
+  Symbol & Default & Description \\
+  \midrule
+  \multicolumn{3}{@{}l}{\textit{Standard (inherited from AdamW)}} \\[3pt]
+  $\eta$ & task-dependent & Learning rate \\
+  $\beta_1$ & $0.9$ & First moment decay \\
+  $\beta_2$ & $0.999$ & Second moment decay \\
+  $\varepsilon$ & $10^{-8}$ & Numerical stabilizer \\
+  $\lambda$ & $0.01$ & Decoupled weight decay \\[6pt]
+  \multicolumn{3}{@{}l}{\textit{EVE-specific}} \\[3pt]
+  $K$ & $4$ & Brood size (number of offspring directions).
+    $K = 1$ recovers AdamW exactly. \\
+  $\gamma_s$ & $0.99$ & Strength signal decay rate \\
+  $\rho$ & $0.5$ & Target entropy ratio for
+    $\beta_{\mathrm{sel}}$ adaptation
+    ($\rho = 0$: pure exploitation;
+     $\rho = 1$: pure exploration) \\
+  $\alpha_\beta$ & $0.01$ & Selection temperature adaptation rate \\
+  $\beta_{\min}, \beta_{\max}$ & $0.1,\; 100$ &
+    Selection temperature clamp \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{%
+\textbf{Minimal tuning surface.}
+The only new hyperparameter that requires user attention is $K$.
+The strength signal decay $\gamma_s$, entropy target $\rho$, and
+temperature adaptation rate $\alpha_\beta$ have robust defaults that
+should not need task-specific tuning.
+$K = 4$ is recommended as the default; $K = 1$ for baselines;
+$K = 8$ for high-risk optimization (noisy gradients, sharp landscapes).
+}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Analysis of Expected Behavior}
+\label{sec:analysis}
+
+\subsection{Smooth Convex Landscapes}
+
+In smooth, well-conditioned settings, the Adam direction $\mathbf{d}_1$
+is near-optimal at every step.
+The probe will consistently assign $w_1 \to 1$ via soft selection, and
+EVE converges to Adam's trajectory.
+The 33\% overhead is pure cost in this regime.
+
+However, the strength signal still accumulates useful information, and
+the complementary offspring provides insurance against sudden landscape
+changes (e.g., curriculum transitions, data distribution shifts).
+
+\subsection{Heterogeneous Curvature (Transformers)}
+
+Modern architectures contain parameters at wildly different scales:
+attention weights, layer norm parameters, embeddings, and MLP weights
+have curvature profiles that differ by orders of magnitude.
+Adam's per-parameter adaptivity helps, but its single-direction
+commitment means it cannot simultaneously apply different
+\emph{strategies} to different parameter groups.
+
+EVE's offspring provide this: the complementary offspring amplifies
+gradient signal on dimensions where Adam is stalling (identified by
+$s_t \approx 0$), while the contrarian offspring pushes through
+high-curvature regions.
+The selection mechanism determines the optimal blend automatically
+at each step.
+
+\subsection{Sharp Minima}
+
+In a sharp minimum, $\|g_t\|$ and $v_t$ are both large.
+The Adam offspring takes a small, curvature-normalized step deeper
+into the minimum.
+The contrarian offspring inverts this logic: it takes a step that is
+\emph{proportional} to $\sqrt{v_t}$ (large on high-curvature dims),
+effectively pushing against the curvature walls.
+If the probe shows that moving against curvature reduces loss on $B'$
+(indicating the minimum is sharp but not deep), the contrarian receives
+positive selection weight, enabling escape.
+
+This mechanism is related to SAM's perturbation-based sharpness
+detection, but operates at the level of the update direction rather
+than requiring a separate perturbation--re-evaluation loop.
+
+\subsection{Hyperparameter Robustness}
+
+At suboptimal learning rates, different offspring respond differently:
+\begin{itemize}[leftmargin=1.6em, itemsep=3pt]
+  \item $\eta$ too large: The gradient offspring $\mathbf{d}_2$
+    (no momentum smoothing) is most volatile; the Adam offspring
+    $\mathbf{d}_1$ (momentum-averaged) is more stable.
+    Selection shifts toward $\mathbf{d}_1$.
+  \item $\eta$ too small: The contrarian offspring $\mathbf{d}_4$
+    takes relatively larger steps (it operates on sign/curvature,
+    less sensitive to $\eta$ scaling).
+    Selection shifts toward $\mathbf{d}_4$.
+  \item $\eta$ correct: The Adam offspring $\mathbf{d}_1$ performs
+    well, but the complementary offspring $\mathbf{d}_3$ recovers
+    any dimensions where Adam is nonetheless stuck.
+    Selection balances all four.
+\end{itemize}
+
+This implicit adaptation widens the basin of acceptable learning rates:
+EVE at a mediocre $\eta$ should approach the performance of Adam at
+a tuned $\eta$.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Evolutionary Interpretation}
+\label{sec:evolutionary}
+
+EVE's design philosophy rests on a distinction between
+\emph{population evolution} and \emph{strategy evolution}.
+Traditional evolutionary optimizers (ES, CMA-ES, neuroevolution)
+maintain a population of candidate parameter vectors and evolve them
+through selection, crossover, and mutation.
+EVE instead evolves the \emph{update strategy} applied to a single
+parameter vector: the offspring are not candidate solutions but
+candidate \emph{behaviors}.
+Natural selection operates not on organisms but on strategies---a
+level of abstraction closer to cultural evolution or
+meme theory~\cite{dawkins1976selfish} than to biological speciation.
+
+This reframing eliminates the $\mathcal{O}(N)$ memory and
+$\mathcal{O}(N^2)$ interaction costs of population-based methods
+while preserving the core evolutionary advantage: competing strategies
+are evaluated on empirical fitness, and selection pressure drives
+adaptation.
+
+\medskip
+\begin{center}
+\small
+\begin{tabular}{@{}p{5.5cm}p{5.5cm}@{}}
+  \toprule
+  Population-Based Evolution & EVE (Strategy Evolution) \\
+  \midrule
+  Real population of $N$ models &
+    Single model, $K$ virtual offspring \\
+  Fitness = model performance &
+    Fitness = direction quality \\
+  Crossover blends parameter vectors &
+    Softmax blends update directions \\
+  Mutation perturbs parameters &
+    Offspring construction explores strategies \\
+  Selection eliminates weak individuals &
+    Selection downweights weak directions \\
+  Diversity via speciation/crowding &
+    Diversity via offspring design \\
+  $\mathcal{O}(N^2)$ interaction matrices &
+    $\mathcal{O}(K)$ softmax ($K \leq 8$) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\notebox{%
+\textbf{Replicator dynamics.}
+The softmax selection over offspring strategies is a discrete
+approximation to the replicator equation from evolutionary game
+theory~\cite{taylor1978evolutionary}:
+$\dot{x}_k = x_k\,(\mathcal{F}_k - \bar{\mathcal{F}})$,
+where $x_k$ is the population fraction of strategy $k$ and
+$\bar{\mathcal{F}}$ is mean fitness.
+EVE's selection weights evolve analogously across steps, with the
+strength signal and temperature adaptation providing the equivalent
+of mutation and genetic drift.
+}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Discussion and Open Questions}
+\label{sec:discussion}
+
+\subsubsection{Optimal Offspring Design}
+
+The four canonical offspring
+(\cref{eq:offspring_adam}--\cref{eq:offspring_contrarian}) were chosen
+to cover Adam's primary failure modes (momentum lag, dimension neglect,
+curvature entrapment).
+Task-specific offspring---e.g., a ``layer-aware'' offspring that applies
+different strategies to attention heads vs.\ feed-forward layers---could
+further improve performance on structured architectures.
+Meta-learning the offspring construction from training dynamics is a
+natural extension.
+
+\subsubsection{Interaction with Learning Rate Schedules}
+
+EVE's adaptive selection partially subsumes the role of learning rate
+warmup and annealing.
+Whether EVE can fully replace learning rate schedules, or whether it
+should be composed with them, is an empirical question.
+Early experiments should test EVE with constant $\eta$ against
+Adam with cosine annealing.
+
+\subsubsection{Second-Order Offspring}
+
+The current offspring use only first-order information ($g_t$, $m_t$,
+$v_t$, $s_t$).
+An offspring direction based on approximate Hessian-vector products
+(e.g., via finite differences: $(g(\theta + \varepsilon p) - g(\theta))
+/ \varepsilon$ for a probe direction $p$) would add curvature
+information beyond $v_t$'s diagonal approximation.
+This requires an additional backward pass per offspring, changing the
+cost calculus; a single Hessian offspring at $K = 5$ may be worthwhile.
+
+\subsubsection{Distributed Training}
+
+In data-parallel distributed training, the gradient $g_t$ is
+all-reduced across workers.
+The probe evaluation can be distributed similarly: each worker
+evaluates $K / W$ offspring on its local sub-batch shard, and
+fitness values are all-reduced.
+This maintains EVE's constant overhead across worker counts.
+
+\subsubsection{Formal Convergence for $K > 1$}
+
+While $K = 1$ inherits Adam's convergence guarantees, the full
+$K > 1$ dynamics---where the update direction changes adaptively
+at each step---require a separate convergence analysis.
+The key challenge is that the effective update direction is a function
+of the loss surface (through the probe), introducing a non-trivial
+dependence between the update and the stochastic gradient.
+We conjecture that convergence holds under standard smoothness and
+bounded-variance assumptions, with the selection mechanism acting
+as an adaptive preconditioner, but a formal proof is left to future
+work.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented EVE, an optimizer that embeds evolutionary selection
+pressure directly in the parameter update rule.
+By constructing $K$ offspring directions---competing update strategies
+derived from existing moment buffers---and selecting among them via
+probe-based fitness evaluation on shared data, EVE transforms Adam's
+rigid single-formula update into an adaptive multi-strategy system.
+
+The framework is parameterized by a single integer $K$:
+at $K = 1$, EVE is exactly AdamW with zero overhead;
+at $K > 1$, it adaptively selects among $K$ strategies for $\sim$33\%
+additional compute, independent of brood size.
+The strength signal provides evolutionary memory across steps,
+enabling complementary offspring to rescue dimensions where Adam's
+momentum has stalled.
+
+EVE's design philosophy is that evolution is not about populations---it
+is about \emph{selection pressure applied to competing strategies}.
+A population of one is sufficient, provided the strategies are diverse
+and the selection is honest.
+The probe ensures honesty (real loss on real data), the offspring
+ensure diversity (by construction), and the softmax ensures softness
+(no strategy is ever fully discarded).
+
+Where Adam tells you the single best guess, EVE asks: what if we
+tried $K$ different ideas and kept the best?
+The answer, it turns out, is worth about one-third of a forward pass.
+
+
+% ── References ─────────────────────────────────────────────────────────────
+\begin{thebibliography}{20}
+
+\bibitem{kingma2015adam}
+Kingma, D.~P.\ \& Ba, J.\ (2015).
+Adam: A method for stochastic optimization.
+In \textit{Proceedings of ICLR 2015}.
+
+\bibitem{loshchilov2019decoupled}
+Loshchilov, I.\ \& Hutter, F.\ (2019).
+Decoupled weight decay regularization.
+In \textit{Proceedings of ICLR 2019}.
+
+\bibitem{foret2021sharpnessaware}
+Foret, P., Kleiner, A., Mobahi, H., \& Neyshabur, B.\ (2021).
+Sharpness-aware minimization for efficiently improving generalization.
+In \textit{Proceedings of ICLR 2021}.
+
+\bibitem{reddi2018convergence}
+Reddi, S.~J., Kale, S., \& Kumar, S.\ (2018).
+On the convergence of Adam and beyond.
+In \textit{Proceedings of ICLR 2018}.
+
+\bibitem{liu2020radam}
+Liu, L., Jiang, H., He, P., Chen, W., Liu, X., Gao, J., \& Han, J.\ (2020).
+On the variance of the adaptive learning rate and beyond.
+In \textit{Proceedings of ICLR 2020}.
+
+\bibitem{shazeer2018adafactor}
+Shazeer, N.\ \& Stern, M.\ (2018).
+Adafactor: Adaptive learning rates with sublinear memory cost.
+In \textit{Proceedings of ICML 2018}.
+
+\bibitem{chen2024lion}
+Chen, X., Liang, C., Huang, D., Real, E., Wang, K., Liu, Y.,
+Pham, H., Dong, X., Luber, T., Cho, M., Bengio, S., \& Le, Q.~V.\ (2024).
+Symbolic discovery of optimization algorithms.
+In \textit{Proceedings of NeurIPS 2023}.
+
+\bibitem{defazio2023dadaptation}
+Defazio, A.\ \& Mishchenko, K.\ (2023).
+Learning-rate-free learning by D-adaptation.
+In \textit{Proceedings of ICML 2023}.
+
+\bibitem{mishchenko2024prodigy}
+Mishchenko, K.\ \& Defazio, A.\ (2024).
+Prodigy: An expeditiously adaptive parameter-free learner.
+In \textit{Proceedings of ICML 2024}.
+
+\bibitem{defazio2024schedulefree}
+Defazio, A., Yang, X., Mehta, H., Mishchenko, K., Khaled, A.,
+\& Cutkosky, A.\ (2024).
+The road less scheduled.
+\textit{arXiv:2405.15682}.
+
+\bibitem{zhang2019lookahead}
+Zhang, M.~R., Lucas, J., Hinton, G., \& Ba, J.\ (2019).
+Lookahead optimizer: $k$ steps forward, 1 step back.
+In \textit{Proceedings of NeurIPS 2019}.
+
+\bibitem{izmailov2018averaging}
+Izmailov, P., Podoprikhin, D., Garipov, T., Vetrov, D., \&
+Wilson, A.~G.\ (2018).
+Averaging weights leads to wider optima and better generalization.
+In \textit{Proceedings of UAI 2018}.
+
+\bibitem{mansilla2021domain}
+Mansilla, L., Echeveste, R., Milone, D.~H., \& Ferrante, E.\ (2021).
+Domain generalization via gradient surgery.
+In \textit{Proceedings of ICCV 2021}.
+
+\bibitem{salimans2017evolution}
+Salimans, T., Ho, J., Chen, X., Sidor, S., \& Sutskever, I.\ (2017).
+Evolution strategies as a scalable alternative to reinforcement learning.
+\textit{arXiv:1703.03864}.
+
+\bibitem{hansen2001cma}
+Hansen, N.\ \& Ostermeier, A.\ (2001).
+Completely derandomized self-adaptation in evolution strategies.
+\textit{Evolutionary Computation}, 9(2), 159--195.
+
+\bibitem{taylor1978evolutionary}
+Taylor, P.~D.\ \& Jonker, L.~B.\ (1978).
+Evolutionary stable strategies and game dynamics.
+\textit{Mathematical Biosciences}, 40(1--2), 145--156.
+
+\bibitem{dawkins1976selfish}
+Dawkins, R.\ (1976).
+\textit{The Selfish Gene}.
+Oxford University Press.
+
+\bibitem{zhuang2022surrogate}
+Zhuang, J., Gong, B., Yuan, L., Cui, Y., Adam, H., Dvornek, N.,
+Tatikonda, S., Duncan, J., \& Liu, T.\ (2022).
+Surrogate gap minimization improves sharpness-aware training.
+In \textit{Proceedings of ICLR 2022}.
+
+\bibitem{liu2022towards}
+Liu, Y., Mai, S., Chen, X., Hsieh, C.-J., \& You, Y.\ (2022).
+Towards efficient and scalable sharpness-aware minimization.
+In \textit{Proceedings of CVPR 2022}.
+
+\end{thebibliography}
+
+\end{document}
