@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
-from torch.func import functional_call
+from torch.func import functional_call, vmap
 from torch.nn import Module
 
 
@@ -144,6 +144,48 @@ class EVE(torch.optim.Optimizer):
 
         self._global_step += 1
 
+        # ── K=1: fused single-pass AdamW  (Proposition 2) ────────────────
+        if K == 1:
+            for group in self.param_groups:
+                beta1, beta2 = group["betas"]
+                eps = group["eps"]
+                lr = group["lr"]
+                wd = group["weight_decay"]
+
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["step"] = 0
+                        state["m"] = torch.zeros_like(
+                            p, memory_format=torch.preserve_format
+                        )
+                        state["v"] = torch.zeros_like(
+                            p, memory_format=torch.preserve_format
+                        )
+                        state["s"] = torch.full_like(p, 0.5)
+
+                    state["step"] += 1
+                    m, v = state["m"], state["v"]
+
+                    m.mul_(beta1).add_(p.grad, alpha=1.0 - beta1)
+                    v.mul_(beta2).addcmul_(p.grad, p.grad, value=1.0 - beta2)
+
+                    bc1 = 1.0 - beta1 ** state["step"]
+                    step_size = lr / bc1
+                    bc2_sqrt = math.sqrt(1.0 - beta2 ** state["step"])
+
+                    if wd != 0.0:
+                        p.data.mul_(1.0 - lr * wd)
+                    denom = (v.sqrt() / bc2_sqrt).add_(eps)
+                    p.data.addcdiv_(m, denom, value=-step_size)
+
+            return loss
+
+        # ── K>1 path ─────────────────────────────────────────────────────
+
         # Obtain current training loss for strength signal when no closure.
         if current_loss is None and data is not None and model is not None:
             inp, tgt = data
@@ -151,11 +193,10 @@ class EVE(torch.optim.Optimizer):
                 current_loss = loss_fn(model(self._unpack_input(inp)), tgt).item()
 
         # ── Phase 1: strength-signal update (Eq. 25) ─────────────────────
-        #    Uses g_t (current gradient) plus stored prev-step quantities.
         self._update_strength_signal(current_loss)
 
         # ── Phase 2: moment updates + offspring construction ─────────────
-        offspring_map: Dict[int, List[Tensor]] = {}
+        offspring_map: Dict[int, Tensor] = {}
         sqrt_v_hat_map: Dict[int, Tensor] = {}
         ptr_to_lr: Dict[int, float] = {}
 
@@ -176,20 +217,21 @@ class EVE(torch.optim.Optimizer):
 
                 if len(state) == 0:
                     state["step"] = 0
-                    state["m"] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                    state["v"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["m"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
+                    state["v"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
                     state["s"] = torch.full_like(p, 0.5)
                     state["prev_update_sign"] = torch.zeros_like(p)
 
                 state["step"] += 1
                 m, v = state["m"], state["v"]
 
-                # Eq. 1: m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
                 m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                # Eq. 2: v_t = beta2 * v_{t-1} + (1 - beta2) * g_t^2
                 v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                # Bias-corrected sqrt(v_hat)
                 bc2 = 1.0 - beta2 ** state["step"]
                 sqrt_v_hat = (v / bc2).sqrt()
                 sqrt_v_hat_map[p.data_ptr()] = sqrt_v_hat
@@ -202,6 +244,8 @@ class EVE(torch.optim.Optimizer):
                 params_with_grad.append((group, p))
 
         # 2b. Second pass — construct offspring directions (Eqs. 7–10).
+        #     Directions are stacked into a (K, *shape) tensor per parameter
+        #     for efficient vmap probe and einsum-based weighted combination.
         for group, p in params_with_grad:
             grad = p.grad
             state = self.state[p]
@@ -213,62 +257,35 @@ class EVE(torch.optim.Optimizer):
             bc1 = 1.0 - beta1 ** state["step"]
             m_hat = m / bc1
             sqrt_v_hat = sqrt_v_hat_map[p.data_ptr()]
-            denom = sqrt_v_hat + eps  # sqrt(v_hat) + eps
+            denom = sqrt_v_hat + eps
 
             directions: List[Tensor] = []
 
-            # d1 — Adam (Eq. 7): -m_hat / (sqrt(v_hat) + eps)
+            # d1 — Adam (Eq. 7)
             directions.append(m_hat.neg() / denom)
 
             if grp_K >= 2:
-                # d2 — Gradient (Eq. 8): -g / (sqrt(v_hat) + eps)
+                # d2 — Gradient (Eq. 8)
                 directions.append(grad.neg() / denom)
 
             if grp_K >= 3:
-                # d3 — Complementary (Eq. 9): -g*(1-s) / (sqrt(v_hat)+eps)
+                # d3 — Complementary (Eq. 9)
                 directions.append((grad.neg() * (1.0 - s)) / denom)
 
             if grp_K >= 4:
-                # d4 — Contrarian (Eq. 10):
-                #   -sign(g) * sqrt(v_hat) / (max(sqrt(v_hat)) + eps)
+                # d4 — Contrarian (Eq. 10)
                 directions.append(
                     grad.sign().neg() * (sqrt_v_hat / (global_max_sqrt_v + eps))
                 )
 
-            # Extended offspring for K > 4 (Section 4.1.2):
-            # Momentum interpolation: alpha_j in (0,1).
+            # Extended offspring for K > 4 (Section 4.1.2)
             if grp_K > 4:
                 for j in range(1, grp_K - 3):
                     alpha_j = j / (grp_K - 3)
                     interp = m_hat * alpha_j + grad * (1.0 - alpha_j)
                     directions.append(interp.neg() / denom)
 
-            offspring_map[p.data_ptr()] = directions
-
-        # ── Phase 3: K=1 fast path  (exact AdamW — Prop. 2) ─────────────
-        if K == 1:
-            for group, p in params_with_grad:
-                d1 = offspring_map[p.data_ptr()][0]
-                lr = group["lr"]
-                wd = group["weight_decay"]
-                state = self.state[p]
-
-                # Compute actual displacement sign BEFORE modifying p.data:
-                # Δθ = lr*d1 − lr*wd*θ_t   →   sign(d1 − wd*θ_t)
-                with torch.no_grad():
-                    if wd != 0.0:
-                        state["prev_update_sign"] = (d1 - wd * p.data).sign()
-                    else:
-                        state["prev_update_sign"] = d1.sign()
-
-                # Eq. 6: θ_{t+1} = (1 − η λ) θ_t + η d1
-                with torch.no_grad():
-                    if wd != 0.0:
-                        p.data.mul_(1.0 - lr * wd)
-                    p.data.add_(d1, alpha=lr)
-
-            self._prev_loss = current_loss
-            return loss
+            offspring_map[p.data_ptr()] = torch.stack(directions)
 
         # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
         assert model is not None and loss_fn is not None and data is not None
@@ -278,63 +295,71 @@ class EVE(torch.optim.Optimizer):
         probe_size = max(1, batch_len // K)
         probe_inp = self._slice_input(inp, probe_size)
         probe_tgt = tgt[:probe_size]
+        fwd_args = self._unpack_fwd_args(probe_inp)
 
-        # Determine the device for the fitness tensor.
-        device = next(iter(sqrt_v_hat_map.values())).device
-
-        # Base loss L(θ_t; B')  — control variate (Eq. 14).
-        with torch.no_grad():
-            L_base: float = loss_fn(
-                model(self._unpack_input(probe_inp)), probe_tgt
-            ).item()
-
-        # Evaluate each offspring at θ_t + η·d_k  (forward only, no backward).
-        fitness = torch.zeros(K, device=device)
-        for k in range(K):
-            candidate_params: Dict[str, Tensor] = {}
-            for name, param in model.named_parameters():
-                ptr = param.data_ptr()
-                if ptr in offspring_map and k < len(offspring_map[ptr]):
-                    lr_k = ptr_to_lr.get(ptr, self.defaults["lr"])
-                    candidate_params[name] = param.data + lr_k * offspring_map[ptr][k]
-                else:
-                    candidate_params[name] = param.data.clone()
-
-            with torch.no_grad():
-                out_k = functional_call(
-                    model, candidate_params, self._unpack_fwd_args(probe_inp)
+        # Build stacked candidate parameters {name: (K, *shape)} for vmap.
+        stacked_params: Dict[str, Tensor] = {}
+        for name, param in model.named_parameters():
+            ptr = param.data_ptr()
+            if ptr in offspring_map:
+                lr_k = ptr_to_lr.get(ptr, self.defaults["lr"])
+                stacked_params[name] = (
+                    param.data.unsqueeze(0) + lr_k * offspring_map[ptr]
                 )
-                L_k: float = loss_fn(out_k, probe_tgt).item()
+            else:
+                stacked_params[name] = param.data.unsqueeze(0).expand(
+                    K, *param.shape
+                )
 
-            # F_k = L_base − L_k  (positive ⇒ offspring reduced loss)
-            fitness[k] = L_base - L_k
+        was_training = model.training
+        model.eval()
+
+        def _probe_loss(params: Dict[str, Tensor]) -> Tensor:
+            out = functional_call(model, params, fwd_args)
+            return loss_fn(out, probe_tgt)
+
+        with torch.no_grad():
+            L_base = loss_fn(
+                model(self._unpack_input(probe_inp)), probe_tgt
+            )
+
+            if not hasattr(self, "_vmap_ok"):
+                try:
+                    losses = vmap(_probe_loss)(stacked_params)
+                    self._vmap_ok = True
+                except Exception:
+                    self._vmap_ok = False
+
+            if self._vmap_ok:
+                losses = vmap(_probe_loss)(stacked_params)
+            else:
+                losses = torch.stack([
+                    _probe_loss({n: stacked_params[n][k] for n in stacked_params})
+                    for k in range(K)
+                ])
+
+        model.train(was_training)
+
+        fitness = L_base - losses
 
         # ── Phase 5: soft selection (Eq. 18) ─────────────────────────────
-        # w_k = softmax(β_sel · F)
         weights = torch.softmax(self.beta_sel * fitness, dim=0)
 
         # ── Phase 6: weighted update (Eq. 20) ───────────────────────────
-        #    θ_{t+1} = θ_t + η Σ w_k d_k − η λ θ_t
         for group, p in params_with_grad:
-            directions = offspring_map[p.data_ptr()]
+            dir_stack = offspring_map[p.data_ptr()]
             lr = group["lr"]
             wd = group["weight_decay"]
             state = self.state[p]
 
-            # combined = Σ w_k · d_k  (convex combination)
-            combined = torch.zeros_like(p)
-            for k, d_k in enumerate(directions):
-                combined.add_(d_k, alpha=weights[k].item())
+            combined = torch.einsum("k...,k->...", dir_stack, weights)
 
-            # Compute displacement sign BEFORE modifying p.data
             with torch.no_grad():
                 if wd != 0.0:
                     state["prev_update_sign"] = (combined - wd * p.data).sign()
                 else:
                     state["prev_update_sign"] = combined.sign()
 
-            # Apply update
-            with torch.no_grad():
                 if wd != 0.0:
                     p.data.mul_(1.0 - lr * wd)
                 p.data.add_(combined, alpha=lr)
