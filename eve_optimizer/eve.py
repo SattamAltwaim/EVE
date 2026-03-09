@@ -59,6 +59,7 @@ class EVE(torch.optim.Optimizer):
         alpha_beta: float = 0.01,
         beta_sel_init: float = 1.0,
         beta_sel_range: Tuple[float, float] = (0.1, 100.0),
+        record_diagnostics: bool = False,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -88,6 +89,8 @@ class EVE(torch.optim.Optimizer):
         self.beta_sel: float = beta_sel_init
         self._prev_loss: Optional[float] = None
         self._global_step: int = 0
+        self.record_diagnostics: bool = record_diagnostics
+        self._diagnostics: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     #  Public API
@@ -345,6 +348,13 @@ class EVE(torch.optim.Optimizer):
         # ── Phase 5: soft selection (Eq. 18) ─────────────────────────────
         weights = torch.softmax(self.beta_sel * fitness, dim=0)
 
+        # ── Diagnostics capture ──────────────────────────────────────────
+        if self.record_diagnostics:
+            self._record_step_diagnostics(
+                fitness, weights, offspring_map, params_with_grad,
+                current_loss,
+            )
+
         # ── Phase 6: weighted update (Eq. 20) ───────────────────────────
         for group, p in params_with_grad:
             dir_stack = offspring_map[p.data_ptr()]
@@ -433,6 +443,79 @@ class EVE(torch.optim.Optimizer):
 
         self.beta_sel *= math.exp(alpha_beta * (H_star - H_t))
         self.beta_sel = max(beta_min, min(beta_max, self.beta_sel))
+
+    # ------------------------------------------------------------------
+    #  Diagnostics recording
+    # ------------------------------------------------------------------
+
+    def _record_step_diagnostics(
+        self,
+        fitness: Tensor,
+        weights: Tensor,
+        offspring_map: Dict[int, Tensor],
+        params_with_grad: List[Tuple[Dict, Tensor]],
+        current_loss: Optional[float],
+    ) -> None:
+        """Capture per-step internal state for analysis (CPU, detached)."""
+        K = fitness.shape[0]
+
+        flat_dirs: List[List[Tensor]] = [[] for _ in range(K)]
+        flat_combined: List[Tensor] = []
+        all_s: List[Tensor] = []
+
+        for _group, p in params_with_grad:
+            dirs = offspring_map[p.data_ptr()]
+            for k in range(K):
+                flat_dirs[k].append(dirs[k].detach().reshape(-1))
+            combined = torch.einsum("k...,k->...", dirs, weights)
+            flat_combined.append(combined.detach().reshape(-1))
+            state = self.state[p]
+            if "s" in state:
+                all_s.append(state["s"].detach().reshape(-1))
+
+        dir_vecs = [torch.cat(fd).cpu() for fd in flat_dirs]
+        combined_vec = torch.cat(flat_combined).cpu()
+
+        dir_norms = [v.norm().item() for v in dir_vecs]
+
+        cos_pairs: Dict[str, float] = {}
+        labels = [f"d{i+1}" for i in range(K)]
+        for i in range(K):
+            for j in range(i + 1, K):
+                key = f"{labels[i]}-{labels[j]}"
+                cos_pairs[key] = torch.nn.functional.cosine_similarity(
+                    dir_vecs[i].unsqueeze(0), dir_vecs[j].unsqueeze(0)
+                ).item()
+
+        cos_to_combined = [
+            torch.nn.functional.cosine_similarity(
+                dir_vecs[k].unsqueeze(0), combined_vec.unsqueeze(0)
+            ).item()
+            for k in range(K)
+        ]
+
+        s_stats: Dict[str, float] = {}
+        if all_s:
+            s_cat = torch.cat(all_s).cpu()
+            s_stats = {
+                "mean": s_cat.mean().item(),
+                "std": s_cat.std().item(),
+                "min": s_cat.min().item(),
+                "max": s_cat.max().item(),
+                "median": s_cat.median().item(),
+            }
+
+        self._diagnostics.append({
+            "step": self._global_step,
+            "loss": current_loss,
+            "fitness": fitness.detach().cpu().tolist(),
+            "weights": weights.detach().cpu().tolist(),
+            "beta_sel": self.beta_sel,
+            "dir_norms": dir_norms,
+            "cos_pairs": cos_pairs,
+            "cos_to_combined": cos_to_combined,
+            "s_stats": s_stats,
+        })
 
     # ------------------------------------------------------------------
     #  Input handling helpers
