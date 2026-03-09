@@ -425,7 +425,7 @@ class EVE(torch.optim.Optimizer):
     def _adapt_temperature(self, weights: Tensor, K: int) -> None:
         """Multiplicative temperature update targeting entropy ratio rho.
 
-        β_sel ← β_sel · exp(α_β · (H* − H_t))
+        β_sel ← β_sel · exp(α_β · (H_t − H*))
         where H_t = −Σ w_k log w_k,  H* = ρ · log K.
         """
         if K <= 1:
@@ -441,7 +441,7 @@ class EVE(torch.optim.Optimizer):
         log_w = torch.log(weights.clamp(min=1e-30))
         H_t: float = -(weights * log_w).sum().item()
 
-        self.beta_sel *= math.exp(alpha_beta * (H_star - H_t))
+        self.beta_sel *= math.exp(alpha_beta * (H_t - H_star))
         self.beta_sel = max(beta_min, min(beta_max, self.beta_sel))
 
     # ------------------------------------------------------------------

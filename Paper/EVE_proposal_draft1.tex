@@ -752,7 +752,7 @@ $\rho \in (0, 1)$ (default: $\rho = 0.5$).
 The temperature adapts via multiplicative update:
 \begin{equation}
   \beta_{\mathrm{sel}}^{(t+1)} = \beta_{\mathrm{sel}}^{(t)} \cdot
-    \exp\!\bigl(\alpha_\beta\,(H^* - H_t)\bigr)
+    \exp\!\bigl(\alpha_\beta\,(H_t - H^*)\bigr)
   \label{eq:temperature_adapt}
 \end{equation}
 \smallskip
