@@ -44,8 +44,8 @@
   linkcolor=accent2,
   citecolor=accent,
   urlcolor=accent2,
-  pdftitle={EVE: Evolutionary Virtual Exploration},
-  pdfauthor={Research Paper}
+  pdftitle={EVE: Evolutionary Virtual Exploration -- Research Proposal},
+  pdfauthor={Research Proposal}
 }
 
 % ── Section style ──────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@
 \renewcommand{\headrulewidth}{0.4pt}
 \fancyhead[L]{\small\color{graytext}\textit{EVE} \textemdash\
               Evolutionary Virtual Exploration}
-\fancyhead[R]{\small\color{graytext}Draft}
+\fancyhead[R]{\small\color{graytext}Research Proposal}
 \fancyfoot[C]{\small\color{graytext}\thepage}
 
 % ── tcolorbox styles ───────────────────────────────────────────────────────
@@ -143,9 +143,9 @@
   {\color{accent}\LARGE\bfseries EVE}\\[6pt]
   {\color{accent2}\Large Evolutionary Virtual Exploration}\\[8pt]
   {\large Adaptive Optimization via Offspring Direction\\[2pt]
-  Selection with Probe-Based Fitness Evaluation}\\[14pt]
-  {\normalsize\color{graytext}\itshape Draft \textemdash\
-  March 2026}\\[6pt]
+  Selection with Probe-Based Fitness Evaluation}\\[10pt]
+  {\normalsize\color{graytext}\bfseries Research Proposal}\\[6pt]
+  {\normalsize\color{graytext}\itshape March 2026}\\[6pt]
 \end{center}
 
 \noindent{\color{rulecol}\rule{\linewidth}{1.2pt}}
@@ -161,7 +161,7 @@ of gradient moments.
 Yet Adam commits to a single update direction at every step, cannot detect
 when that direction is locally suboptimal, and structurally neglects
 parameter dimensions where gradient signal is noisy.
-We present \textbf{EVE}---Evolutionary Virtual Exploration---an optimizer
+We propose \textbf{EVE}---Evolutionary Virtual Exploration---an optimizer
 that embeds evolutionary selection pressure directly inside the parameter
 update rule.
 At each step, EVE constructs $K$ \emph{offspring directions}: competing
@@ -179,14 +179,17 @@ at $K=1$, EVE \emph{exactly} degenerates to AdamW with zero overhead;
 at $K>1$, EVE adaptively selects among $K$ strategies at a fixed cost of
 approximately one additional forward pass, regardless of $K$.
 EVE preserves Adam's convergence guarantees at $K=1$ and provides
-principled exploration--exploitation control via adaptive selection
+exploration--exploitation control via adaptive selection
 temperature, with no additional hyperparameters beyond the brood size.
+This proposal presents the theoretical framework, algorithmic design,
+and analysis of expected behavior for EVE, and outlines the experimental
+validation required to establish its empirical effectiveness.
 
 \vspace{4pt}
 \noindent{\color{rulecol}\rule{\linewidth}{0.6pt}}
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Introduction}
+\section{Introduction and Motivation}
 \label{sec:intro}
 
 The Adam optimizer~\cite{kingma2015adam} and its decoupled weight decay
@@ -241,7 +244,7 @@ optimizer that cannot self-correct.
 
 These are not bugs in Adam's implementation; they are structural
 consequences of committing to a single update formula per step.
-EVE addresses all four by introducing a minimal evolutionary layer:
+We propose that EVE can address these limitations by introducing a minimal evolutionary layer:
 multiple candidate directions are spawned, tested, and selected at
 every step, so the optimizer can adapt its \emph{strategy}---not just
 its step size---to the local loss landscape.
@@ -252,8 +255,8 @@ EVE spawns \emph{offspring directions}---virtual candidate updates
 derived analytically from existing moment buffers---and evaluates their
 fitness via cheap forward-only passes on a shared data sub-batch.
 Soft selection via temperature-scaled softmax produces a combined
-update that is provably at least as good as any single strategy
-(in expectation over the selection), and the brood size $K$ provides
+update that is a convex combination of the offspring directions,
+and the brood size $K$ provides
 a clean, user-facing knob trading compute for adaptivity.
 
 At $K = 1$, only the Adam direction exists, selection is trivial, and
@@ -289,7 +292,7 @@ uniformly low in a neighborhood, requiring two forward--backward passes
 per step (100\% overhead).
 GSAM~\cite{zhuang2022surrogate} and LookSAM~\cite{liu2022towards}
 reduce this cost via periodic perturbation or surrogate gradients.
-EVE provides a softer form of sharpness awareness: offspring directions
+EVE is designed to provide a softer form of sharpness awareness: offspring directions
 that probe different local geometries, evaluated via forward-only passes
 at $\sim$33\% overhead.
 
@@ -324,6 +327,60 @@ EVE distills the evolutionary insight---multiple strategies, fitness-based
 selection, complementarity-driven exploration---into a single-model
 optimizer with zero population overhead.
 
+\subsection{Symbolic and Learned Optimizer Discovery}
+
+A growing body of work seeks to \emph{discover} optimization algorithms
+automatically, rather than design them by hand.
+The learning-to-optimize (L2O) paradigm~\cite{andrychowicz2016l2l}
+parameterizes the update rule as a neural network (typically an LSTM)
+that ingests gradients and outputs parameter updates, trained via
+meta-learning over a distribution of tasks.
+However, L2O methods require unrolled computational graphs during
+meta-training, creating massive memory overhead that limits their
+applicability to small-scale proxy tasks; the resulting optimizers
+often struggle to generalize to state-of-the-art settings with
+significantly larger models and longer training
+horizons~\cite{metz2019understanding}.
+
+VeLO~\cite{metz2022velo} scaled this approach by meta-training a
+learned optimizer across thousands of tasks using approximately
+4,000 TPU-months of compute.
+While VeLO demonstrated that scaling meta-training can improve
+generalization, independent evaluation has raised concerns about its
+hyperparameter sensitivity and inconsistent performance relative
+to hand-designed baselines~\cite{kaddour2023velo}.
+The prohibitive meta-training cost also makes iterative improvement
+of such learned optimizers impractical.
+
+An alternative line of work formulates optimizer discovery as symbolic
+program search.
+Bello et al.~\cite{bello2017neural} used reinforcement learning to
+search over tree-structured compositions of predefined operands
+(gradient, momentum) and operators (unary/binary math operations),
+discovering update rules such as PowerSign and AddSign.
+Chen et al.~\cite{chen2024lion} extended this with evolutionary search
+over a larger program space, discovering the Lion optimizer---a
+sign-momentum rule that eliminates the second moment.
+While these symbolic methods produce interpretable and transferable
+update rules, their search processes remain computationally expensive
+(requiring extensive GPU/TPU resources for the search itself) and,
+critically, the discovered optimizers are still \emph{fixed} update
+formulas: they commit to a single strategy per step, inheriting the
+same single-direction limitation as Adam.
+
+EVE takes a fundamentally different approach.
+Rather than searching for a better fixed update rule at enormous
+computational cost, EVE provides a lightweight runtime mechanism
+for adaptively selecting among multiple update strategies at every
+step.
+The offspring directions are derived analytically from existing moment
+buffers at negligible cost, and the selection is driven by empirical
+fitness on real data.
+This positions EVE not as a competitor to optimizer discovery methods,
+but as a complementary framework: discovered optimizers (such as Lion)
+could themselves serve as offspring directions within EVE's selection
+mechanism.
+
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Notation and Preliminaries}
@@ -357,7 +414,7 @@ $\varepsilon$ a numerical stabilizer.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{The EVE Framework}
+\section{Proposed Method: The EVE Framework}
 \label{sec:method}
 
 EVE augments the standard adaptive gradient update with three mechanisms:
@@ -452,7 +509,7 @@ principled default that covers the primary failure modes of Adam.
 
 The core of EVE's selection mechanism is a \emph{probe}: a forward-only
 evaluation of each offspring direction on a shared sub-batch, producing
-a noise-free fitness ranking.
+a fitness ranking.
 
 \subsubsection{Shared Sub-Batch Extraction}
 
@@ -807,7 +864,7 @@ stall on dimension $d$.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Implementation}
+\section{Proposed Implementation}
 \label{sec:implementation}
 
 \subsection{Full Algorithm}
@@ -921,7 +978,8 @@ When \texttt{vmap} is available, all $K$ probe forward passes execute
 in a single kernel.
 The actual overhead depends on the model's forward-to-backward ratio
 and I/O pipeline; for large transformers where data loading and backward
-dominate, the probe overhead may be 10--20\% in practice.
+dominate, the probe overhead may be lower in practice.
+This remains to be validated empirically.
 }
 
 
@@ -960,8 +1018,9 @@ dominate, the probe overhead may be 10--20\% in practice.
 \textbf{Minimal tuning surface.}
 The only new hyperparameter that requires user attention is $K$.
 The strength signal decay $\gamma_s$, entropy target $\rho$, and
-temperature adaptation rate $\alpha_\beta$ have robust defaults that
-should not need task-specific tuning.
+temperature adaptation rate $\alpha_\beta$ are designed to have
+robust defaults; whether they require task-specific tuning is an
+empirical question to be investigated.
 $K = 4$ is recommended as the default; $K = 1$ for baselines;
 $K = 8$ for high-risk optimization (noisy gradients, sharp landscapes).
 }
@@ -971,12 +1030,16 @@ $K = 8$ for high-risk optimization (noisy gradients, sharp landscapes).
 \section{Analysis of Expected Behavior}
 \label{sec:analysis}
 
+The following analyses describe \emph{expected} behavior based on the
+mathematical structure of EVE's components. Empirical validation is
+required to confirm these predictions.
+
 \subsection{Smooth Convex Landscapes}
 
 In smooth, well-conditioned settings, the Adam direction $\mathbf{d}_1$
-is near-optimal at every step.
-The probe will consistently assign $w_1 \to 1$ via soft selection, and
-EVE converges to Adam's trajectory.
+is expected to be near-optimal at every step.
+The probe would consistently assign $w_1 \to 1$ via soft selection, and
+EVE would converge to Adam's trajectory.
 The 33\% overhead is pure cost in this regime.
 
 However, the strength signal still accumulates useful information, and
@@ -992,11 +1055,11 @@ Adam's per-parameter adaptivity helps, but its single-direction
 commitment means it cannot simultaneously apply different
 \emph{strategies} to different parameter groups.
 
-EVE's offspring provide this: the complementary offspring amplifies
+EVE's offspring are designed to address this: the complementary offspring amplifies
 gradient signal on dimensions where Adam is stalling (identified by
 $s_t \approx 0$), while the contrarian offspring pushes through
 high-curvature regions.
-The selection mechanism determines the optimal blend automatically
+The selection mechanism determines the blend automatically
 at each step.
 
 \subsection{Sharp Minima}
@@ -1008,7 +1071,7 @@ The contrarian offspring inverts this logic: it takes a step that is
 \emph{proportional} to $\sqrt{v_t}$ (large on high-curvature dims),
 effectively pushing against the curvature walls.
 If the probe shows that moving against curvature reduces loss on $B'$
-(indicating the minimum is sharp but not deep), the contrarian receives
+(indicating the minimum is sharp but not deep), the contrarian would receive
 positive selection weight, enabling escape.
 
 This mechanism is related to SAM's perturbation-based sharpness
@@ -1017,25 +1080,25 @@ than requiring a separate perturbation--re-evaluation loop.
 
 \subsection{Hyperparameter Robustness}
 
-At suboptimal learning rates, different offspring respond differently:
+At suboptimal learning rates, different offspring are expected to respond differently:
 \begin{itemize}[leftmargin=1.6em, itemsep=3pt]
   \item $\eta$ too large: The gradient offspring $\mathbf{d}_2$
     (no momentum smoothing) is most volatile; the Adam offspring
     $\mathbf{d}_1$ (momentum-averaged) is more stable.
-    Selection shifts toward $\mathbf{d}_1$.
+    Selection would shift toward $\mathbf{d}_1$.
   \item $\eta$ too small: The contrarian offspring $\mathbf{d}_4$
     takes relatively larger steps (it operates on sign/curvature,
     less sensitive to $\eta$ scaling).
-    Selection shifts toward $\mathbf{d}_4$.
+    Selection would shift toward $\mathbf{d}_4$.
   \item $\eta$ correct: The Adam offspring $\mathbf{d}_1$ performs
-    well, but the complementary offspring $\mathbf{d}_3$ recovers
+    well, but the complementary offspring $\mathbf{d}_3$ may recover
     any dimensions where Adam is nonetheless stuck.
-    Selection balances all four.
+    Selection would balance all four.
 \end{itemize}
 
-This implicit adaptation widens the basin of acceptable learning rates:
-EVE at a mediocre $\eta$ should approach the performance of Adam at
-a tuned $\eta$.
+This implicit adaptation is hypothesized to widen the basin of acceptable learning rates.
+Whether EVE at a suboptimal $\eta$ can match the performance of Adam at
+a tuned $\eta$ is a key empirical question for the proposed experiments.
 
 
 % ══════════════════════════════════════════════════════════════════════════
@@ -1100,7 +1163,7 @@ of mutation and genetic drift.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Discussion and Open Questions}
+\section{Research Directions and Open Questions}
 \label{sec:discussion}
 
 \subsubsection{Optimal Offspring Design}
@@ -1142,7 +1205,7 @@ all-reduced across workers.
 The probe evaluation can be distributed similarly: each worker
 evaluates $K / W$ offspring on its local sub-batch shard, and
 fitness values are all-reduced.
-This maintains EVE's constant overhead across worker counts.
+This would maintain EVE's constant overhead across worker counts.
 
 \subsubsection{Formal Convergence for $K > 1$}
 
@@ -1159,10 +1222,10 @@ work.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Conclusion}
+\section{Expected Contributions}
 \label{sec:conclusion}
 
-We have presented EVE, an optimizer that embeds evolutionary selection
+This proposal presents EVE, an optimizer that embeds evolutionary selection
 pressure directly in the parameter update rule.
 By constructing $K$ offspring directions---competing update strategies
 derived from existing moment buffers---and selecting among them via
@@ -1174,24 +1237,28 @@ at $K = 1$, EVE is exactly AdamW with zero overhead;
 at $K > 1$, it adaptively selects among $K$ strategies for $\sim$33\%
 additional compute, independent of brood size.
 The strength signal provides evolutionary memory across steps,
-enabling complementary offspring to rescue dimensions where Adam's
+enabling complementary offspring to target dimensions where Adam's
 momentum has stalled.
 
 EVE's design philosophy is that evolution is not about populations---it
 is about \emph{selection pressure applied to competing strategies}.
 A population of one is sufficient, provided the strategies are diverse
-and the selection is honest.
-The probe ensures honesty (real loss on real data), the offspring
+and the selection is informed by real loss on real data.
+The offspring
 ensure diversity (by construction), and the softmax ensures softness
 (no strategy is ever fully discarded).
 
-Where Adam tells you the single best guess, EVE asks: what if we
-tried $K$ different ideas and kept the best?
-The answer, it turns out, is worth about one-third of a forward pass.
+If validated empirically, EVE would demonstrate that adaptive strategy
+selection can be embedded directly inside the optimizer update rule at
+minimal cost, offering a new axis of optimizer design orthogonal to
+learning rate adaptation and sharpness-aware methods.
+The proposed experimental program will determine whether this theoretical
+promise translates into practical gains across architectures, tasks, and
+scales.
 
 
 % ── References ─────────────────────────────────────────────────────────────
-\begin{thebibliography}{20}
+\begin{thebibliography}{25}
 
 \bibitem{kingma2015adam}
 Kingma, D.~P.\ \& Ba, J.\ (2015).
@@ -1291,6 +1358,37 @@ In \textit{Proceedings of ICLR 2022}.
 Liu, Y., Mai, S., Chen, X., Hsieh, C.-J., \& You, Y.\ (2022).
 Towards efficient and scalable sharpness-aware minimization.
 In \textit{Proceedings of CVPR 2022}.
+
+\bibitem{andrychowicz2016l2l}
+Andrychowicz, M., Denil, M., Gomez, S., Hoffman, M.~W., Pfau, D.,
+Schaul, T., Shillingford, B., \& de~Freitas, N.\ (2016).
+Learning to learn by gradient descent by gradient descent.
+In \textit{Proceedings of NeurIPS 2016}.
+
+\bibitem{metz2019understanding}
+Metz, L., Maheswaranathan, N., Nixon, J., Freeman, D., \&
+Sohl-Dickstein, J.\ (2019).
+Understanding and correcting pathologies in the training of learned
+optimizers.
+In \textit{Proceedings of ICML 2019}.
+
+\bibitem{metz2022velo}
+Metz, L., Harrison, J., Freeman, C.~D., Merchant, A., Beyer, L.,
+Bradbury, J., Agrawal, N., Poole, B., Mordatch, I., Roberts, A.,
+\& Sohl-Dickstein, J.\ (2022).
+VeLO: Training versatile learned optimizers by scaling up.
+\textit{arXiv:2211.09760}.
+
+\bibitem{kaddour2023velo}
+Kaddour, J., Zhu, X., Liu, B., \& Hospedales, T.\ (2023).
+Is scaling learned optimizers worth it? Evaluating the value of
+VeLO's 4000 TPU months.
+\textit{arXiv:2310.18191}.
+
+\bibitem{bello2017neural}
+Bello, I., Zoph, B., Vasudevan, V., \& Le, Q.~V.\ (2017).
+Neural optimizer search with reinforcement learning.
+In \textit{Proceedings of ICML 2017}.
 
 \end{thebibliography}
 
