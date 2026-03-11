@@ -28,7 +28,7 @@ class EVE(torch.optim.Optimizer):
 
     At ``K=1`` this is exactly AdamW (probes are skipped, no overhead).
     At ``K>1`` the optimizer constructs *K* offspring directions, evaluates
-    them via forward-only probes on a shared sub-batch, and selects among
+    them via forward-only probes on the full training batch, and selects among
     them with temperature-scaled softmax.
 
     Args:
@@ -290,14 +290,12 @@ class EVE(torch.optim.Optimizer):
 
             offspring_map[p.data_ptr()] = torch.stack(directions)
 
-        # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
+        # ── Phase 4: probe-based fitness evaluation on full batch (Eq. 14) ──
         assert model is not None and loss_fn is not None and data is not None
 
         inp, tgt = data
-        batch_len = self._input_len(inp)
-        probe_size = max(1, batch_len // K)
-        probe_inp = self._slice_input(inp, probe_size)
-        probe_tgt = tgt[:probe_size]
+        probe_inp = inp
+        probe_tgt = tgt
         fwd_args = self._unpack_fwd_args(probe_inp)
 
         # Build stacked candidate parameters {name: (K, *shape)} for vmap.
