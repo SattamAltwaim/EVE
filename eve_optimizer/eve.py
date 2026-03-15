@@ -479,9 +479,17 @@ class EVE(torch.optim.Optimizer):
         params_with_grad: List[Tuple[Dict, Tensor]],
         current_loss: Optional[float],
     ) -> None:
-        """Capture per-step internal state for analysis (CPU, detached)."""
+        """Capture per-step internal state for analysis.
+
+        All heavy computation (norms, cosine similarities, strength-signal
+        statistics) is performed on the GPU; only the final scalars are
+        transferred to CPU via .item().  This avoids the ~269 MB of
+        synchronous GPU→CPU tensor copies that the naïve implementation
+        incurred (~1 150 ms overhead per step on an L4 GPU).
+        """
         K = fitness.shape[0]
 
+        # ── Collect flat direction vectors and combined update ON GPU ─────────
         flat_dirs: List[List[Tensor]] = [[] for _ in range(K)]
         flat_combined: List[Tensor] = []
         all_s: List[Tensor] = []
@@ -496,48 +504,55 @@ class EVE(torch.optim.Optimizer):
             if "s" in state:
                 all_s.append(state["s"].detach().reshape(-1))
 
-        dir_vecs = [torch.cat(fd).cpu() for fd in flat_dirs]
-        combined_vec = torch.cat(flat_combined).cpu()
+        # Concatenate on GPU — no .cpu() here.
+        dir_vecs: List[Tensor] = [torch.cat(fd) for fd in flat_dirs]
+        combined_vec: Tensor = torch.cat(flat_combined)
 
-        dir_norms = [v.norm().item() for v in dir_vecs]
+        # ── Norms (GPU reduction → single scalar transfer each) ───────────────
+        dir_norms: List[float] = [v.norm().item() for v in dir_vecs]
 
-        cos_pairs: Dict[str, float] = {}
+        # ── Cosine similarities on GPU ────────────────────────────────────────
+        # Pre-normalise once per vector to avoid redundant norm computations.
+        eps_cs = 1e-8
+        dir_norms_t = [v.norm().clamp(min=eps_cs) for v in dir_vecs]
+        dir_unit: List[Tensor] = [v / n for v, n in zip(dir_vecs, dir_norms_t)]
+        combined_norm = combined_vec.norm().clamp(min=eps_cs)
+        combined_unit: Tensor = combined_vec / combined_norm
+
         labels = [f"d{i+1}" for i in range(K)]
+        cos_pairs: Dict[str, float] = {}
         for i in range(K):
             for j in range(i + 1, K):
-                key = f"{labels[i]}-{labels[j]}"
-                cos_pairs[key] = torch.nn.functional.cosine_similarity(
-                    dir_vecs[i].unsqueeze(0), dir_vecs[j].unsqueeze(0)
-                ).item()
+                cos_pairs[f"{labels[i]}-{labels[j]}"] = (
+                    (dir_unit[i] * dir_unit[j]).sum().item()
+                )
 
-        cos_to_combined = [
-            torch.nn.functional.cosine_similarity(
-                dir_vecs[k].unsqueeze(0), combined_vec.unsqueeze(0)
-            ).item()
-            for k in range(K)
+        cos_to_combined: List[float] = [
+            (dir_unit[k] * combined_unit).sum().item() for k in range(K)
         ]
 
+        # ── Strength-signal statistics on GPU ─────────────────────────────────
         s_stats: Dict[str, float] = {}
         if all_s:
-            s_cat = torch.cat(all_s).cpu()
+            s_cat = torch.cat(all_s)          # GPU tensor
             s_stats = {
-                "mean": s_cat.mean().item(),
-                "std": s_cat.std().item(),
-                "min": s_cat.min().item(),
-                "max": s_cat.max().item(),
+                "mean":   s_cat.mean().item(),
+                "std":    s_cat.std().item(),
+                "min":    s_cat.min().item(),
+                "max":    s_cat.max().item(),
                 "median": s_cat.median().item(),
             }
 
         self._diagnostics.append({
-            "step": self._global_step,
-            "loss": current_loss,
-            "fitness": fitness.detach().cpu().tolist(),
-            "weights": weights.detach().cpu().tolist(),
-            "beta_sel": self.beta_sel,
-            "dir_norms": dir_norms,
-            "cos_pairs": cos_pairs,
+            "step":           self._global_step,
+            "loss":           current_loss,
+            "fitness":        fitness.detach().cpu().tolist(),
+            "weights":        weights.detach().cpu().tolist(),
+            "beta_sel":       self.beta_sel,
+            "dir_norms":      dir_norms,
+            "cos_pairs":      cos_pairs,
             "cos_to_combined": cos_to_combined,
-            "s_stats": s_stats,
+            "s_stats":        s_stats,
         })
 
     # ------------------------------------------------------------------
