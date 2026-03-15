@@ -466,7 +466,75 @@ def run_real(loader, loss_fn, n_warmup=5, n_measure=20):
     return timing, bwt
 
 
-# ── 8. Comparison summary ─────────────────────────────────────────────────────
+# ── 8. Scenarios C & D: actual opt.step() end-to-end ─────────────────────────
+
+def run_actual_step(loader, loss_fn, record_diagnostics: bool,
+                    n_warmup=5, n_measure=20):
+    """
+    Calls the REAL opt.step() (not timed_eve_step) in a genuine training loop
+    with CUDA-synchronized batch timing.  Used for both Scenario C and D.
+
+    Scenario C: record_diagnostics=False  → should match Scenario B's 70ms
+    Scenario D: record_diagnostics=True   → reveals _record_step_diagnostics cost
+    """
+    label_c_d = "C" if not record_diagnostics else "D"
+    diag_str  = "record_diagnostics=False" if not record_diagnostics else "record_diagnostics=True"
+
+    print("\n" + "="*72)
+    print(f"  SCENARIO {label_c_d}: ACTUAL opt.step()  [{diag_str}]")
+    print("="*72)
+
+    torch.manual_seed(42)
+    model = make_model()
+    opt   = EVE(model.parameters(), lr=1e-3, K=4, rho=0.5,
+                record_diagnostics=record_diagnostics)
+
+    batch_wall_times: List[float] = []
+    data_iter = iter(loader)
+    retries_before_total = alloc_retries()
+
+    for step_idx in range(n_warmup + n_measure):
+        try:
+            xb, yb = next(data_iter)
+        except StopIteration:
+            data_iter = iter(loader)
+            xb, yb = next(data_iter)
+        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+
+        model.train()
+
+        # ── Full batch: fwd + bwd + REAL opt.step() ──────────────────────────
+        cuda_sync(); t0 = time.perf_counter()
+
+        opt.zero_grad()
+        loss = loss_fn(model(xb), yb)
+        loss.backward()
+        opt.step(model=model, loss_fn=loss_fn, data=(xb, yb),
+                 current_loss=loss.item())
+
+        cuda_sync(); batch_ms = (time.perf_counter() - t0) * 1e3
+
+        if step_idx >= n_warmup:
+            batch_wall_times.append(batch_ms)
+
+    retries_after_total = alloc_retries()
+    bwt = np.array(batch_wall_times)
+
+    alloc_mb, reserved_mb = mem_mb()
+    print(f"\n  Full-batch wall time (fwd + bwd + opt.step):")
+    print(f"    Mean={bwt.mean():.1f}ms  Median={np.median(bwt):.1f}ms  "
+          f"p95={np.percentile(bwt,95):.1f}ms  Max={bwt.max():.1f}ms")
+    print(f"\n  CUDA memory at end:")
+    print(f"    Allocated={alloc_mb:.1f} MB  Reserved={reserved_mb:.1f} MB")
+    print(f"\n  CUDA alloc retries (cumulative over all steps):")
+    print(f"    Before scenario : {retries_before_total}")
+    print(f"    After scenario  : {retries_after_total}")
+    print(f"    New retries     : {retries_after_total - retries_before_total}")
+
+    return bwt
+
+
+# ── 9. Comparison summary ─────────────────────────────────────────────────────
 
 def print_comparison(iso_timing, real_timing, real_bwt):
     print("\n" + "="*72)
@@ -500,7 +568,7 @@ def print_comparison(iso_timing, real_timing, real_bwt):
     print(f"  Most-slowed phase: [{worst}]  {slowdowns[worst]:.2f}x slower in real training")
 
 
-# ── 9. Main ───────────────────────────────────────────────────────────────────
+# ── 10. Main ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import numpy as np
@@ -516,14 +584,59 @@ if __name__ == "__main__":
     loss_fn = nn.CrossEntropyLoss()
     loader  = make_loader(N_SAMPLES, BATCH_SIZE)
 
-    # Scenario A
+    # Scenario A — isolated (manual reimpl, clean allocator)
     iso_timing = run_isolated(loader, loss_fn, N_WARMUP, N_MEASURE)
 
-    # Scenario B
+    # Scenario B — real (manual reimpl, after backward)
     real_timing, real_bwt = run_real(loader, loss_fn, N_WARMUP, N_MEASURE)
 
-    # Side-by-side comparison
+    # Side-by-side A vs B
     print_comparison(iso_timing, real_timing, real_bwt)
+
+    # Scenario C — ACTUAL opt.step(), record_diagnostics=False
+    bwt_c = run_actual_step(loader, loss_fn,
+                            record_diagnostics=False,
+                            n_warmup=N_WARMUP, n_measure=N_MEASURE)
+
+    # Scenario D — ACTUAL opt.step(), record_diagnostics=True
+    bwt_d = run_actual_step(loader, loss_fn,
+                            record_diagnostics=True,
+                            n_warmup=N_WARMUP, n_measure=N_MEASURE)
+
+    # Final summary
+    print("\n" + "="*72)
+    print("  FINAL SUMMARY — all scenarios")
+    print("="*72)
+    print(f"  {'Scenario':<52s} {'Mean ms':>8s}  {'Median':>8s}  {'p95':>8s}")
+    print(f"  {'─'*52} {'─'*8}  {'─'*8}  {'─'*8}")
+
+    def row(label, arr):
+        a = np.array(arr)
+        print(f"  {label:<52s} {a.mean():8.1f}  {np.median(a):8.1f}  "
+              f"{np.percentile(a,95):8.1f}")
+
+    row("A  Isolated  (manual reimpl, clean allocator)", iso_timing[PHASE_NAMES[0]])
+    # For A and B, report total across phases rather than single-phase
+    iso_total_per_step = [
+        sum(iso_timing[p][i] for p in PHASE_NAMES)
+        for i in range(N_MEASURE)
+    ]
+    real_total_per_step = [
+        sum(real_timing[p][i] for p in PHASE_NAMES)
+        for i in range(N_MEASURE)
+    ]
+    row("A  Isolated  — TOTAL EVE phases (ms)", iso_total_per_step)
+    row("B  Real      — TOTAL EVE phases (ms, after backward)", real_total_per_step)
+    row("B  Real      — full batch incl. fwd+bwd (ms)", real_bwt)
+    row("C  opt.step  — full batch, record_diagnostics=False", bwt_c)
+    row("D  opt.step  — full batch, record_diagnostics=True ", bwt_d)
+
+    print(f"  {'─'*52} {'─'*8}  {'─'*8}  {'─'*8}")
+    diag_overhead = np.mean(bwt_d) - np.mean(bwt_c)
+    print(f"\n  _record_step_diagnostics overhead (D - C): {diag_overhead:+.1f} ms/step")
+    if np.mean(bwt_c) > 0:
+        print(f"  Overhead vs AdamW (~11ms):  C={np.mean(bwt_c)/11*100-100:.0f}%  "
+              f"D={np.mean(bwt_d)/11*100-100:.0f}%")
 
     print("\n" + "="*72)
     print("  DONE")
