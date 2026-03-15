@@ -10,16 +10,21 @@ Faithful implementation of every equation in the EVE paper draft:
   - Adaptive selection temperature    (Eq. 26,    Section 4.5)
 
 At K=1 the optimizer is *exactly* AdamW with zero overhead.
+
+Probe implementation uses in-place perturbation (perturb → forward → restore),
+which avoids functional_call/vmap overhead and handles BatchNorm models
+correctly. Expected overhead:
+  - sub-batch probe  (|B'| = |B|/K): ~33%  (paper's design, Proposition 1)
+  - full-batch probe (|B'| = |B|):   ~133% for K=4
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch import Tensor
-from torch.func import functional_call, vmap
 from torch.nn import Module
 
 
@@ -28,8 +33,9 @@ class EVE(torch.optim.Optimizer):
 
     At ``K=1`` this is exactly AdamW (probes are skipped, no overhead).
     At ``K>1`` the optimizer constructs *K* offspring directions, evaluates
-    them via forward-only probes on the full training batch, and selects among
-    them with temperature-scaled softmax.
+    them via forward-only probes on the full training batch using in-place
+    parameter perturbation, and selects among them with temperature-scaled
+    softmax.
 
     Args:
         params: iterable of parameters or parameter-group dicts.
@@ -44,6 +50,8 @@ class EVE(torch.optim.Optimizer):
         alpha_beta: selection-temperature adaptation rate.
         beta_sel_init: initial selection temperature (beta_sel).
         beta_sel_range: (min, max) clamp for selection temperature.
+        record_diagnostics: if True, append per-step internal state to
+            ``self._diagnostics`` for analysis.
     """
 
     def __init__(
@@ -103,6 +111,7 @@ class EVE(torch.optim.Optimizer):
         model: Optional[Module] = None,
         loss_fn: Optional[Callable[..., Tensor]] = None,
         data: Optional[Tuple[Any, Any]] = None,
+        current_loss: Optional[float] = None,
     ) -> Optional[Tensor]:
         """Perform a single optimisation step.
 
@@ -111,14 +120,19 @@ class EVE(torch.optim.Optimizer):
         sequence.
 
         For **K>1** the probe evaluation requires ``model``, ``loss_fn``,
-        and ``data``:
+        and ``data``. Pass ``current_loss=loss.item()`` to avoid an extra
+        hidden forward pass (the loss is already computed during the
+        training backward pass):
 
         .. code-block:: python
 
             optimizer.zero_grad()
             loss = loss_fn(model(x), y)
             loss.backward()
-            optimizer.step(model=model, loss_fn=loss_fn, data=(x, y))
+            optimizer.step(
+                model=model, loss_fn=loss_fn, data=(x, y),
+                current_loss=loss.item(),
+            )
 
         Args:
             closure: re-evaluates the model and returns the loss (optional).
@@ -126,16 +140,25 @@ class EVE(torch.optim.Optimizer):
             loss_fn: ``loss_fn(model_output, target) -> scalar`` (req. K>1).
             data: ``(input, target)`` for probe evaluation (req. K>1).
                   *input* may be a single tensor or a tuple of tensors.
+            current_loss: scalar loss value from the current training step.
+                  When provided, no extra forward pass is needed for the
+                  strength signal.  If omitted and no closure is given, EVE
+                  will run one extra forward pass to obtain this value.
 
         Returns:
             The training loss when *closure* is provided, else ``None``.
         """
-        loss: Optional[Tensor] = None
+        ret_loss: Optional[Tensor] = None
         if closure is not None:
             with torch.enable_grad():
-                loss = closure()
+                ret_loss = closure()
 
-        current_loss: Optional[float] = loss.item() if loss is not None else None
+        # Resolve current_loss from (in priority order):
+        # 1. explicit keyword argument
+        # 2. closure return value
+        # 3. fallback extra forward pass (Bug 2 — only if no better source)
+        if current_loss is None and ret_loss is not None:
+            current_loss = ret_loss.item()
 
         K: int = self.defaults["K"]
 
@@ -185,15 +208,21 @@ class EVE(torch.optim.Optimizer):
                     denom = (v.sqrt() / bc2_sqrt).add_(eps)
                     p.data.addcdiv_(m, denom, value=-step_size)
 
-            return loss
+            return ret_loss
 
         # ── K>1 path ─────────────────────────────────────────────────────
 
-        # Obtain current training loss for strength signal when no closure.
-        if current_loss is None and data is not None and model is not None:
-            inp, tgt = data
+        # Fallback: compute current_loss from a forward pass only when the
+        # caller did not supply it. This path is avoided when the notebook
+        # passes current_loss=loss.item() (Fix Bug 2).
+        assert model is not None and loss_fn is not None and data is not None
+        inp, tgt = data
+
+        if current_loss is None:
             with torch.no_grad():
-                current_loss = loss_fn(model(self._unpack_input(inp)), tgt).item()
+                current_loss = loss_fn(
+                    model(self._unpack_input(inp)), tgt
+                ).item()
 
         # ── Phase 1: strength-signal update (Eq. 25) ─────────────────────
         self._update_strength_signal(current_loss)
@@ -202,12 +231,11 @@ class EVE(torch.optim.Optimizer):
         offspring_map: Dict[int, Tensor] = {}
         sqrt_v_hat_map: Dict[int, Tensor] = {}
         ptr_to_lr: Dict[int, float] = {}
-
-        # 2a. First pass — update moments, compute sqrt(v_hat), find global
-        #     max(sqrt(v_hat)) needed by the contrarian offspring (Eq. 10).
-        global_max_sqrt_v: float = 0.0
         params_with_grad: List[Tuple[Dict, Tensor]] = []
 
+        # 2a. First pass — update moments and collect sqrt(v_hat).
+        #     Do NOT call .item() inside the loop; that forces a CPU-GPU
+        #     sync for every parameter (Fix Bug 1).
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
 
@@ -239,16 +267,18 @@ class EVE(torch.optim.Optimizer):
                 sqrt_v_hat = (v / bc2).sqrt()
                 sqrt_v_hat_map[p.data_ptr()] = sqrt_v_hat
 
-                local_max = sqrt_v_hat.max().item()
-                if local_max > global_max_sqrt_v:
-                    global_max_sqrt_v = local_max
-
                 ptr_to_lr[p.data_ptr()] = group["lr"]
                 params_with_grad.append((group, p))
 
+        # Single GPU reduction across all parameters — one .item() sync
+        # instead of one per parameter (Fix Bug 1).
+        global_max_sqrt_v: float = torch.stack(
+            [sv.max() for sv in sqrt_v_hat_map.values()]
+        ).max().item()
+
         # 2b. Second pass — construct offspring directions (Eqs. 7–10).
-        #     Directions are stacked into a (K, *shape) tensor per parameter
-        #     for efficient vmap probe and einsum-based weighted combination.
+        #     Stacked into a (K, *shape) tensor per parameter for the
+        #     weighted einsum update (Phase 6).
         for group, p in params_with_grad:
             grad = p.grad
             state = self.state[p]
@@ -290,54 +320,49 @@ class EVE(torch.optim.Optimizer):
 
             offspring_map[p.data_ptr()] = torch.stack(directions)
 
-        # ── Phase 4: probe-based fitness evaluation on full batch (Eq. 14) ──
-        assert model is not None and loss_fn is not None and data is not None
-
-        inp, tgt = data
-        probe_inp = inp
+        # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
+        #
+        # In-place perturbation approach (Fixes Bugs 3 & 4):
+        #   • No stacked_params dict → no K copies of all parameters
+        #   • No functional_call / vmap → no BatchNorm vmap failures
+        #   • Uses model.forward() directly: handles all layer types
+        #   • Memory: one backup clone of trainable params (D floats, ~44 MB
+        #     for ResNet-18) instead of K copies (~176 MB)
+        #   • Compute: K sequential forward passes on the probe batch
+        #     → paper-compliant cost (Proposition 1 for sub-batch design)
+        #
+        probe_inp = self._unpack_input(inp)
         probe_tgt = tgt
-        fwd_args = self._unpack_fwd_args(probe_inp)
 
-        # Build stacked candidate parameters {name: (K, *shape)} for vmap.
-        stacked_params: Dict[str, Tensor] = {}
-        for name, param in model.named_parameters():
-            ptr = param.data_ptr()
-            if ptr in offspring_map:
-                lr_k = ptr_to_lr.get(ptr, self.defaults["lr"])
-                stacked_params[name] = (
-                    param.data.unsqueeze(0) + lr_k * offspring_map[ptr]
-                )
-            else:
-                stacked_params[name] = param.data.unsqueeze(0).expand(
-                    K, *param.shape
-                )
+        # Backup current parameters (θ_t) — restore after each offspring.
+        saved: Dict[int, Tensor] = {
+            p.data_ptr(): p.data.clone()
+            for _, p in params_with_grad
+        }
 
         was_training = model.training
         model.eval()
 
-        def _probe_loss(params: Dict[str, Tensor]) -> Tensor:
-            out = functional_call(model, params, fwd_args)
-            return loss_fn(out, probe_tgt)
-
         with torch.no_grad():
-            L_base = loss_fn(
-                model(self._unpack_input(probe_inp)), probe_tgt
-            )
+            # Baseline loss at θ_t (control variate, Eq. 14).
+            L_base: Tensor = loss_fn(model(probe_inp), probe_tgt)
 
-            if not hasattr(self, "_vmap_ok"):
-                try:
-                    losses = vmap(_probe_loss)(stacked_params)
-                    self._vmap_ok = True
-                except Exception:
-                    self._vmap_ok = False
+            # Evaluate each offspring direction.
+            probe_losses: List[Tensor] = []
+            for k in range(K):
+                # Perturb: θ_t + η · d_k  (in-place, no extra allocation)
+                for group, p in params_with_grad:
+                    lr_k = group["lr"]
+                    p.data.add_(offspring_map[p.data_ptr()][k], alpha=lr_k)
 
-            if self._vmap_ok:
-                losses = vmap(_probe_loss)(stacked_params)
-            else:
-                losses = torch.stack([
-                    _probe_loss({n: stacked_params[n][k] for n in stacked_params})
-                    for k in range(K)
-                ])
+                # Forward-only pass at perturbed parameters.
+                probe_losses.append(loss_fn(model(probe_inp), probe_tgt))
+
+                # Restore θ_t before next offspring.
+                for _, p in params_with_grad:
+                    p.data.copy_(saved[p.data_ptr()])
+
+            losses = torch.stack(probe_losses)
 
         model.train(was_training)
 
@@ -353,7 +378,7 @@ class EVE(torch.optim.Optimizer):
                 current_loss,
             )
 
-        # ── Phase 6: weighted update (Eq. 20) ───────────────────────────
+        # ── Phase 6: weighted update (Eq. 20) ────────────────────────────
         for group, p in params_with_grad:
             dir_stack = offspring_map[p.data_ptr()]
             lr = group["lr"]
@@ -372,11 +397,11 @@ class EVE(torch.optim.Optimizer):
                     p.data.mul_(1.0 - lr * wd)
                 p.data.add_(combined, alpha=lr)
 
-        # ── Phase 7: adaptive temperature (Eq. 26) ──────────────────────
+        # ── Phase 7: adaptive temperature (Eq. 26) ───────────────────────
         self._adapt_temperature(weights, K)
 
         self._prev_loss = current_loss
-        return loss
+        return ret_loss
 
     # ------------------------------------------------------------------
     #  Strength signal  (Section 4.4, Eq. 25)
@@ -520,20 +545,6 @@ class EVE(torch.optim.Optimizer):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _input_len(inp: Any) -> int:
-        """Return the batch dimension length for a tensor or tuple of tensors."""
-        if isinstance(inp, (tuple, list)):
-            return len(inp[0])
-        return len(inp)
-
-    @staticmethod
-    def _slice_input(inp: Any, n: int) -> Any:
-        """Slice the first *n* samples from a tensor or tuple of tensors."""
-        if isinstance(inp, (tuple, list)):
-            return tuple(x[:n] for x in inp)
-        return inp[:n]
-
-    @staticmethod
     def _unpack_input(inp: Any) -> Any:
         """Unpack a single-element tuple, pass everything else through."""
         if isinstance(inp, (tuple, list)) and len(inp) == 1:
@@ -541,8 +552,8 @@ class EVE(torch.optim.Optimizer):
         return inp
 
     @staticmethod
-    def _unpack_fwd_args(inp: Any) -> tuple:
-        """Wrap *inp* so it can be splatted into ``functional_call``'s args."""
+    def _slice_input(inp: Any, n: int) -> Any:
+        """Slice the first *n* samples from a tensor or tuple of tensors."""
         if isinstance(inp, (tuple, list)):
-            return tuple(inp)
-        return (inp,)
+            return tuple(x[:n] for x in inp)
+        return inp[:n]
