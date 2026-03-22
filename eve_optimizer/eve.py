@@ -1,21 +1,17 @@
 """
-EVE — Evolutionary Virtual Exploration optimizer.
+EVE — Evolutionary Virtual Exploration optimizer (simplified).
 
-Faithful implementation of every equation in the EVE paper draft:
-  - Offspring direction construction  (Eqs. 7–10, Section 4.1)
-  - Probe-based fitness evaluation    (Eq. 14,    Section 4.2)
-  - Soft natural selection            (Eq. 18,    Section 4.3)
-  - EVE parameter update              (Eq. 20,    Section 4.3)
-  - Strength signal                   (Eq. 25,    Section 4.4)
-  - Adaptive selection temperature    (Eq. 26,    Section 4.5)
+Implements the EVE framework from the simpler proposal:
+  - Momentum spectrum offspring      (Eq. 1, Section 2.1)
+  - Probe-based fitness evaluation   (Eq. 2, Section 2.2)
+  - Soft natural selection           (Eq. 3, Section 2.3)
+  - Math collapse → α_eff update    (Eq. 4, Section 2.3)
 
-At K=1 the optimizer is *exactly* AdamW with zero overhead.
+At K=1 the optimizer is *exactly* AMSGrad-AdamW with zero overhead.
 
 Probe implementation uses in-place perturbation (perturb → forward → restore),
 which avoids functional_call/vmap overhead and handles BatchNorm models
-correctly. Expected overhead:
-  - sub-batch probe  (|B'| = |B|/K): ~33%  (paper's design, Proposition 1)
-  - full-batch probe (|B'| = |B|):   ~133% for K=4
+correctly.
 """
 
 from __future__ import annotations
@@ -31,25 +27,24 @@ from torch.nn import Module
 class EVE(torch.optim.Optimizer):
     r"""EVE: Evolutionary Virtual Exploration.
 
-    At ``K=1`` this is exactly AdamW (probes are skipped, no overhead).
-    At ``K>1`` the optimizer constructs *K* offspring directions, evaluates
-    them via forward-only probes on the full training batch using in-place
-    parameter perturbation, and selects among them with temperature-scaled
-    softmax.
+    At ``K=1`` this is AMSGrad-AdamW (probes are skipped, no overhead).
+    At ``K>1`` the optimizer generates *K* offspring directions by
+    interpolating between fast momentum (β₁) and slow momentum (β₁_slow),
+    evaluates them via forward-only probes on the training batch, and
+    selects among them with temperature-scaled softmax.  The final update
+    exploits the "math collapse": since all offspring share the same
+    generator equation, the weighted combination reduces to a single
+    effective interpolation factor α_eff.
 
     Args:
         params: iterable of parameters or parameter-group dicts.
-        lr: learning rate (eta).
-        betas: coefficients for first / second moment EMAs (beta1, beta2).
-        eps: numerical stabiliser (epsilon).
-        weight_decay: decoupled weight decay coefficient (lambda).
+        lr: learning rate (η).
+        betas: coefficients for first / second moment EMAs (β₁, β₂).
+        eps: numerical stabiliser (ε).
+        weight_decay: decoupled weight decay coefficient (λ).
         K: brood size — number of offspring directions.
-        gamma_s: strength-signal decay rate.
-        rho: target entropy ratio for adaptive temperature (0 = pure
-            exploitation, 1 = pure exploration).
-        alpha_beta: selection-temperature adaptation rate.
-        beta_sel_init: initial selection temperature (beta_sel).
-        beta_sel_range: (min, max) clamp for selection temperature.
+        beta1_slow: slow momentum decay rate (β₁_slow).
+        beta_sel: selection temperature for softmax (β_sel).
         record_diagnostics: if True, append per-step internal state to
             ``self._diagnostics`` for analysis.
     """
@@ -61,12 +56,9 @@ class EVE(torch.optim.Optimizer):
         betas: Tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.01,
-        K: int = 4,
-        gamma_s: float = 0.99,
-        rho: float = 0.5,
-        alpha_beta: float = 0.01,
-        beta_sel_init: float = 1.0,
-        beta_sel_range: Tuple[float, float] = (0.1, 100.0),
+        K: int = 2,
+        beta1_slow: float = 0.999,
+        beta_sel: float = 1.0,
         record_diagnostics: bool = False,
     ):
         if lr < 0.0:
@@ -79,6 +71,8 @@ class EVE(torch.optim.Optimizer):
             raise ValueError(f"Invalid epsilon: {eps}")
         if K < 1:
             raise ValueError(f"Brood size K must be >= 1, got {K}")
+        if not 0.0 <= beta1_slow < 1.0:
+            raise ValueError(f"Invalid beta1_slow: {beta1_slow}")
 
         defaults: Dict[str, Any] = dict(
             lr=lr,
@@ -86,17 +80,11 @@ class EVE(torch.optim.Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             K=K,
-            gamma_s=gamma_s,
-            rho=rho,
-            alpha_beta=alpha_beta,
-            beta_sel_init=beta_sel_init,
-            beta_sel_range=beta_sel_range,
+            beta1_slow=beta1_slow,
+            beta_sel=beta_sel,
         )
         super().__init__(params, defaults)
 
-        self.beta_sel: float = beta_sel_init
-        self._prev_loss: Optional[float] = None
-        self._global_step: int = 0
         self.record_diagnostics: bool = record_diagnostics
         self._diagnostics: List[Dict[str, Any]] = []
 
@@ -115,48 +103,17 @@ class EVE(torch.optim.Optimizer):
     ) -> Optional[Tensor]:
         """Perform a single optimisation step.
 
-        For **K=1** (exact AdamW) no extra arguments are needed — just
-        call ``step()`` after the usual ``zero_grad / forward / backward``
-        sequence.
+        For **K=1** (AMSGrad-AdamW) no extra arguments are needed.
 
         For **K>1** the probe evaluation requires ``model``, ``loss_fn``,
-        and ``data``. Pass ``current_loss=loss.item()`` to avoid an extra
-        hidden forward pass (the loss is already computed during the
-        training backward pass):
-
-        .. code-block:: python
-
-            optimizer.zero_grad()
-            loss = loss_fn(model(x), y)
-            loss.backward()
-            optimizer.step(
-                model=model, loss_fn=loss_fn, data=(x, y),
-                current_loss=loss.item(),
-            )
-
-        Args:
-            closure: re-evaluates the model and returns the loss (optional).
-            model: the ``nn.Module`` being trained (required when K>1).
-            loss_fn: ``loss_fn(model_output, target) -> scalar`` (req. K>1).
-            data: ``(input, target)`` for probe evaluation (req. K>1).
-                  *input* may be a single tensor or a tuple of tensors.
-            current_loss: scalar loss value from the current training step.
-                  When provided, no extra forward pass is needed for the
-                  strength signal.  If omitted and no closure is given, EVE
-                  will run one extra forward pass to obtain this value.
-
-        Returns:
-            The training loss when *closure* is provided, else ``None``.
+        and ``data``.  Pass ``current_loss=loss.item()`` to avoid a
+        redundant forward pass.
         """
         ret_loss: Optional[Tensor] = None
         if closure is not None:
             with torch.enable_grad():
                 ret_loss = closure()
 
-        # Resolve current_loss from (in priority order):
-        # 1. explicit keyword argument
-        # 2. closure return value
-        # 3. fallback extra forward pass (Bug 2 — only if no better source)
         if current_loss is None and ret_loss is not None:
             current_loss = ret_loss.item()
 
@@ -168,9 +125,7 @@ class EVE(torch.optim.Optimizer):
                 "arguments for probe-based fitness evaluation."
             )
 
-        self._global_step += 1
-
-        # ── K=1: fused single-pass AdamW  (Proposition 2) ────────────────
+        # ── K=1: fused AMSGrad-AdamW ──────────────────────────────────
         if K == 1:
             for group in self.param_groups:
                 beta1, beta2 = group["betas"]
@@ -191,30 +146,32 @@ class EVE(torch.optim.Optimizer):
                         state["v"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format
                         )
-                        state["s"] = torch.full_like(p, 0.5)
+                        state["v_max"] = torch.zeros_like(
+                            p, memory_format=torch.preserve_format
+                        )
 
                     state["step"] += 1
-                    m, v = state["m"], state["v"]
+                    m, v, v_max = state["m"], state["v"], state["v_max"]
 
                     m.mul_(beta1).add_(p.grad, alpha=1.0 - beta1)
                     v.mul_(beta2).addcmul_(p.grad, p.grad, value=1.0 - beta2)
 
                     bc1 = 1.0 - beta1 ** state["step"]
-                    step_size = lr / bc1
                     bc2_sqrt = math.sqrt(1.0 - beta2 ** state["step"])
+
+                    torch.maximum(v_max, v, out=v_max)
+
+                    step_size = lr / bc1
+                    denom = (v_max.sqrt() / bc2_sqrt).add_(eps)
 
                     if wd != 0.0:
                         p.data.mul_(1.0 - lr * wd)
-                    denom = (v.sqrt() / bc2_sqrt).add_(eps)
                     p.data.addcdiv_(m, denom, value=-step_size)
 
             return ret_loss
 
-        # ── K>1 path ─────────────────────────────────────────────────────
+        # ── K>1 path ──────────────────────────────────────────────────
 
-        # Fallback: compute current_loss from a forward pass only when the
-        # caller did not supply it. This path is avoided when the notebook
-        # passes current_loss=loss.item() (Fix Bug 2).
         assert model is not None and loss_fn is not None and data is not None
         inp, tgt = data
 
@@ -224,20 +181,17 @@ class EVE(torch.optim.Optimizer):
                     model(self._unpack_input(inp)), tgt
                 ).item()
 
-        # ── Phase 1: strength-signal update (Eq. 25) ─────────────────────
-        self._update_strength_signal(current_loss)
-
-        # ── Phase 2: moment updates + offspring construction ─────────────
-        offspring_map: Dict[int, Tensor] = {}
-        sqrt_v_hat_map: Dict[int, Tensor] = {}
-        ptr_to_lr: Dict[int, float] = {}
+        # ── Phase 1: moment updates ───────────────────────────────────
+        # Precompute m_hat, m_hat_slow, denom per parameter for use
+        # during probe (on-the-fly offspring) and final update.
+        m_hat_map: Dict[int, Tensor] = {}
+        m_hat_slow_map: Dict[int, Tensor] = {}
+        denom_map: Dict[int, Tensor] = {}
         params_with_grad: List[Tuple[Dict, Tensor]] = []
 
-        # 2a. First pass — update moments and collect sqrt(v_hat).
-        #     Do NOT call .item() inside the loop; that forces a CPU-GPU
-        #     sync for every parameter (Fix Bug 1).
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
+            beta1_slow = group["beta1_slow"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -251,90 +205,45 @@ class EVE(torch.optim.Optimizer):
                     state["m"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
+                    state["m_slow"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
                     state["v"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                    state["s"] = torch.full_like(p, 0.5)
-                    state["prev_update_sign"] = torch.zeros_like(p)
+                    state["v_max"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
 
                 state["step"] += 1
-                m, v = state["m"], state["v"]
+                m, m_slow = state["m"], state["m_slow"]
+                v, v_max = state["v"], state["v_max"]
 
                 m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                m_slow.mul_(beta1_slow).add_(grad, alpha=1.0 - beta1_slow)
                 v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                bc2 = 1.0 - beta2 ** state["step"]
-                sqrt_v_hat = (v / bc2).sqrt()
-                sqrt_v_hat_map[p.data_ptr()] = sqrt_v_hat
+                step = state["step"]
+                bc1 = 1.0 - beta1 ** step
+                bc1_slow = 1.0 - beta1_slow ** step
+                bc2_sqrt = math.sqrt(1.0 - beta2 ** step)
 
-                ptr_to_lr[p.data_ptr()] = group["lr"]
+                torch.maximum(v_max, v, out=v_max)
+
+                ptr = p.data_ptr()
+                m_hat_map[ptr] = m / bc1
+                m_hat_slow_map[ptr] = m_slow / bc1_slow
+                denom_map[ptr] = (v_max.sqrt() / bc2_sqrt).add_(group["eps"])
+
                 params_with_grad.append((group, p))
 
-        # Single GPU reduction across all parameters — one .item() sync
-        # instead of one per parameter (Fix Bug 1).
-        global_max_sqrt_v: float = torch.stack(
-            [sv.max() for sv in sqrt_v_hat_map.values()]
-        ).max().item()
+        # ── Phase 2: alpha grid ───────────────────────────────────────
+        alphas = [k / (K - 1) for k in range(K)]
 
-        # 2b. Second pass — construct offspring directions (Eqs. 7–10).
-        #     Stacked into a (K, *shape) tensor per parameter for the
-        #     weighted einsum update (Phase 6).
-        for group, p in params_with_grad:
-            grad = p.grad
-            state = self.state[p]
-            eps = group["eps"]
-            grp_K = group["K"]
-            beta1 = group["betas"][0]
-            m, s = state["m"], state["s"]
-
-            bc1 = 1.0 - beta1 ** state["step"]
-            m_hat = m / bc1
-            sqrt_v_hat = sqrt_v_hat_map[p.data_ptr()]
-            denom = sqrt_v_hat + eps
-
-            directions: List[Tensor] = []
-
-            # d1 — Adam (Eq. 7)
-            directions.append(m_hat.neg() / denom)
-
-            if grp_K >= 2:
-                # d2 — Gradient (Eq. 8)
-                directions.append(grad.neg() / denom)
-
-            if grp_K >= 3:
-                # d3 — Complementary (Eq. 9)
-                directions.append((grad.neg() * (1.0 - s)) / denom)
-
-            if grp_K >= 4:
-                # d4 — Contrarian (Eq. 10)
-                directions.append(
-                    grad.sign().neg() * (sqrt_v_hat / (global_max_sqrt_v + eps))
-                )
-
-            # Extended offspring for K > 4 (Section 4.1.2)
-            if grp_K > 4:
-                for j in range(1, grp_K - 3):
-                    alpha_j = j / (grp_K - 3)
-                    interp = m_hat * alpha_j + grad * (1.0 - alpha_j)
-                    directions.append(interp.neg() / denom)
-
-            offspring_map[p.data_ptr()] = torch.stack(directions)
-
-        # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
-        #
-        # In-place perturbation approach (Fixes Bugs 3 & 4):
-        #   • No stacked_params dict → no K copies of all parameters
-        #   • No functional_call / vmap → no BatchNorm vmap failures
-        #   • Uses model.forward() directly: handles all layer types
-        #   • Memory: one backup clone of trainable params (D floats, ~44 MB
-        #     for ResNet-18) instead of K copies (~176 MB)
-        #   • Compute: K sequential forward passes on the probe batch
-        #     → paper-compliant cost (Proposition 1 for sub-batch design)
-        #
+        # ── Phase 3: probe-based fitness evaluation (Eq. 2) ──────────
         probe_inp = self._unpack_input(inp)
         probe_tgt = tgt
 
-        # Backup current parameters (θ_t) — restore after each offspring.
         saved: Dict[int, Tensor] = {
             p.data_ptr(): p.data.clone()
             for _, p in params_with_grad
@@ -344,21 +253,21 @@ class EVE(torch.optim.Optimizer):
         model.eval()
 
         with torch.no_grad():
-            # Baseline loss at θ_t (control variate, Eq. 14).
             L_base: Tensor = loss_fn(model(probe_inp), probe_tgt)
 
-            # Evaluate each offspring direction.
             probe_losses: List[Tensor] = []
             for k in range(K):
-                # Perturb: θ_t + η · d_k  (in-place, no extra allocation)
+                a_k = alphas[k]
                 for group, p in params_with_grad:
-                    lr_k = group["lr"]
-                    p.data.add_(offspring_map[p.data_ptr()][k], alpha=lr_k)
+                    ptr = p.data_ptr()
+                    d_k = (
+                        m_hat_map[ptr].mul(-(1.0 - a_k))
+                        .add_(m_hat_slow_map[ptr], alpha=-a_k)
+                    ).div_(denom_map[ptr])
+                    p.data.add_(d_k, alpha=group["lr"])
 
-                # Forward-only pass at perturbed parameters.
                 probe_losses.append(loss_fn(model(probe_inp), probe_tgt))
 
-                # Restore θ_t before next offspring.
                 for _, p in params_with_grad:
                     p.data.copy_(saved[p.data_ptr()])
 
@@ -368,151 +277,86 @@ class EVE(torch.optim.Optimizer):
 
         fitness = L_base - losses
 
-        # ── Phase 5: soft selection (Eq. 18) ─────────────────────────────
-        weights = torch.softmax(self.beta_sel * fitness, dim=0)
+        # ── Phase 4: soft selection + math collapse (Eqs. 3–4) ────────
+        beta_sel = self.defaults["beta_sel"]
+        weights = torch.softmax(beta_sel * fitness, dim=0)
 
-        # ── Diagnostics capture ──────────────────────────────────────────
+        alphas_t = torch.tensor(alphas, device=weights.device, dtype=weights.dtype)
+        alpha_eff: float = (weights * alphas_t).sum().item()
+
+        # ── Diagnostics capture ───────────────────────────────────────
         if self.record_diagnostics:
             self._record_step_diagnostics(
-                fitness, weights, offspring_map, params_with_grad,
-                current_loss,
+                fitness, weights, alpha_eff, alphas,
+                m_hat_map, m_hat_slow_map, denom_map,
+                params_with_grad, current_loss,
             )
 
-        # ── Phase 6: weighted update (Eq. 20) ────────────────────────────
+        # ── Phase 5: final update via generator equation (Eq. 4) ──────
         for group, p in params_with_grad:
-            dir_stack = offspring_map[p.data_ptr()]
+            ptr = p.data_ptr()
             lr = group["lr"]
             wd = group["weight_decay"]
-            state = self.state[p]
 
-            combined = torch.einsum("k...,k->...", dir_stack, weights)
+            d_final = (
+                m_hat_map[ptr].mul(-(1.0 - alpha_eff))
+                .add_(m_hat_slow_map[ptr], alpha=-alpha_eff)
+            ).div_(denom_map[ptr])
 
             with torch.no_grad():
                 if wd != 0.0:
-                    state["prev_update_sign"] = (combined - wd * p.data).sign()
-                else:
-                    state["prev_update_sign"] = combined.sign()
-
-                if wd != 0.0:
                     p.data.mul_(1.0 - lr * wd)
-                p.data.add_(combined, alpha=lr)
+                p.data.add_(d_final, alpha=lr)
 
-        # ── Phase 7: adaptive temperature (Eq. 26) ───────────────────────
-        self._adapt_temperature(weights, K)
-
-        self._prev_loss = current_loss
         return ret_loss
 
     # ------------------------------------------------------------------
-    #  Strength signal  (Section 4.4, Eq. 25)
-    # ------------------------------------------------------------------
-
-    def _update_strength_signal(self, current_loss: Optional[float]) -> None:
-        """Update per-dimension strength signal s_t.
-
-        s_{t+1,d} = γ_s · s_{t,d}
-                   + (1 − γ_s) · σ(δ_t · sign(Δθ_{t,d}) · sign(−g_{t+1,d}))
-
-        where δ_t = L_prev − L_current (inter-step loss improvement),
-        Δθ is the previous step's displacement, and g_{t+1} is the
-        current gradient.
-        """
-        if self._prev_loss is None or current_loss is None:
-            return
-
-        delta_t: float = self._prev_loss - current_loss
-
-        for group in self.param_groups:
-            gamma_s: float = group["gamma_s"]
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                state = self.state[p]
-                if "s" not in state or "prev_update_sign" not in state:
-                    continue
-
-                s = state["s"]
-                prev_sign = state["prev_update_sign"]
-                neg_grad_sign = p.grad.neg().sign()
-
-                # Eq. 25: sigmoid(δ_t · sign(Δθ) · sign(−g_{t+1}))
-                raw = delta_t * prev_sign * neg_grad_sign
-                update_val = torch.sigmoid(raw)
-
-                s.mul_(gamma_s).add_(update_val, alpha=1.0 - gamma_s)
-
-    # ------------------------------------------------------------------
-    #  Adaptive selection temperature  (Section 4.5, Eq. 26)
-    # ------------------------------------------------------------------
-
-    def _adapt_temperature(self, weights: Tensor, K: int) -> None:
-        """Multiplicative temperature update targeting entropy ratio rho.
-
-        β_sel ← β_sel · exp(α_β · (H_t − H*))
-        where H_t = −Σ w_k log w_k,  H* = ρ · log K.
-        """
-        if K <= 1:
-            return
-
-        rho: float = self.defaults["rho"]
-        alpha_beta: float = self.defaults["alpha_beta"]
-        beta_min, beta_max = self.defaults["beta_sel_range"]
-
-        H_max = math.log(K)
-        H_star = rho * H_max
-
-        log_w = torch.log(weights.clamp(min=1e-30))
-        H_t: float = -(weights * log_w).sum().item()
-
-        self.beta_sel *= math.exp(alpha_beta * (H_t - H_star))
-        self.beta_sel = max(beta_min, min(beta_max, self.beta_sel))
-
-    # ------------------------------------------------------------------
-    #  Diagnostics recording
+    #  Diagnostics recording (moderate level)
     # ------------------------------------------------------------------
 
     def _record_step_diagnostics(
         self,
         fitness: Tensor,
         weights: Tensor,
-        offspring_map: Dict[int, Tensor],
+        alpha_eff: float,
+        alphas: List[float],
+        m_hat_map: Dict[int, Tensor],
+        m_hat_slow_map: Dict[int, Tensor],
+        denom_map: Dict[int, Tensor],
         params_with_grad: List[Tuple[Dict, Tensor]],
         current_loss: Optional[float],
     ) -> None:
         """Capture per-step internal state for analysis.
 
-        All heavy computation (norms, cosine similarities, strength-signal
-        statistics) is performed on the GPU; only the final scalars are
-        transferred to CPU via .item().  This avoids the ~269 MB of
-        synchronous GPU→CPU tensor copies that the naïve implementation
-        incurred (~1 150 ms overhead per step on an L4 GPU).
+        Re-materialises offspring directions on GPU to compute norms and
+        cosine similarities.  Only called when record_diagnostics=True.
         """
         K = fitness.shape[0]
 
-        # ── Collect flat direction vectors and combined update ON GPU ─────────
         flat_dirs: List[List[Tensor]] = [[] for _ in range(K)]
         flat_combined: List[Tensor] = []
-        all_s: List[Tensor] = []
 
         for _group, p in params_with_grad:
-            dirs = offspring_map[p.data_ptr()]
-            for k in range(K):
-                flat_dirs[k].append(dirs[k].detach().reshape(-1))
-            combined = torch.einsum("k...,k->...", dirs, weights)
-            flat_combined.append(combined.detach().reshape(-1))
-            state = self.state[p]
-            if "s" in state:
-                all_s.append(state["s"].detach().reshape(-1))
+            ptr = p.data_ptr()
+            m_hat = m_hat_map[ptr]
+            m_hat_slow = m_hat_slow_map[ptr]
+            denom = denom_map[ptr]
 
-        # Concatenate on GPU — no .cpu() here.
+            dirs_p: List[Tensor] = []
+            for k in range(K):
+                a_k = alphas[k]
+                d_k = (-(1.0 - a_k) * m_hat - a_k * m_hat_slow) / denom
+                dirs_p.append(d_k)
+                flat_dirs[k].append(d_k.detach().reshape(-1))
+
+            d_final = (-(1.0 - alpha_eff) * m_hat - alpha_eff * m_hat_slow) / denom
+            flat_combined.append(d_final.detach().reshape(-1))
+
         dir_vecs: List[Tensor] = [torch.cat(fd) for fd in flat_dirs]
         combined_vec: Tensor = torch.cat(flat_combined)
 
-        # ── Norms (GPU reduction → single scalar transfer each) ───────────────
         dir_norms: List[float] = [v.norm().item() for v in dir_vecs]
 
-        # ── Cosine similarities on GPU ────────────────────────────────────────
-        # Pre-normalise once per vector to avoid redundant norm computations.
         eps_cs = 1e-8
         dir_norms_t = [v.norm().clamp(min=eps_cs) for v in dir_vecs]
         dir_unit: List[Tensor] = [v / n for v, n in zip(dir_vecs, dir_norms_t)]
@@ -531,28 +375,15 @@ class EVE(torch.optim.Optimizer):
             (dir_unit[k] * combined_unit).sum().item() for k in range(K)
         ]
 
-        # ── Strength-signal statistics on GPU ─────────────────────────────────
-        s_stats: Dict[str, float] = {}
-        if all_s:
-            s_cat = torch.cat(all_s)          # GPU tensor
-            s_stats = {
-                "mean":   s_cat.mean().item(),
-                "std":    s_cat.std().item(),
-                "min":    s_cat.min().item(),
-                "max":    s_cat.max().item(),
-                "median": s_cat.median().item(),
-            }
-
         self._diagnostics.append({
-            "step":           self._global_step,
-            "loss":           current_loss,
-            "fitness":        fitness.detach().cpu().tolist(),
-            "weights":        weights.detach().cpu().tolist(),
-            "beta_sel":       self.beta_sel,
-            "dir_norms":      dir_norms,
-            "cos_pairs":      cos_pairs,
+            "loss":            current_loss,
+            "fitness":         fitness.detach().cpu().tolist(),
+            "weights":         weights.detach().cpu().tolist(),
+            "alpha_eff":       alpha_eff,
+            "beta_sel":        self.defaults["beta_sel"],
+            "dir_norms":       dir_norms,
+            "cos_pairs":       cos_pairs,
             "cos_to_combined": cos_to_combined,
-            "s_stats":        s_stats,
         })
 
     # ------------------------------------------------------------------

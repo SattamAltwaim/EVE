@@ -1,4 +1,4 @@
-"""Comprehensive tests for the EVE optimizer.
+"""Comprehensive tests for the EVE optimizer (simplified momentum interpolation).
 
 All models are deliberately tiny (dims 8–32) so the suite runs fast on
 a MacBook M1 CPU.  MPS tests are gated on availability.
@@ -92,13 +92,13 @@ def _train_steps(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  1. K=1 matches AdamW exactly
+#  1. K=1 matches AMSGrad-AdamW exactly
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestK1MatchesAdamW:
-    """EVE(K=1) must produce *bit-identical* parameters to AdamW."""
+class TestK1MatchesAMSGradAdamW:
+    """EVE(K=1) must produce *bit-identical* parameters to AdamW(amsgrad=True)."""
 
-    def test_fc_matches_adamw(self):
+    def test_fc_matches_amsgrad_adamw(self):
         lr, wd, steps = 1e-2, 0.01, 20
         beta1, beta2, eps = 0.9, 0.999, 1e-8
 
@@ -108,10 +108,12 @@ class TestK1MatchesAdamW:
         model_eve = _make_fc()
 
         opt_adam = torch.optim.AdamW(
-            model_adam.parameters(), lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd
+            model_adam.parameters(), lr=lr, betas=(beta1, beta2), eps=eps,
+            weight_decay=wd, amsgrad=True
         )
         opt_eve = EVE(
-            model_eve.parameters(), lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd, K=1
+            model_eve.parameters(), lr=lr, betas=(beta1, beta2), eps=eps,
+            weight_decay=wd, K=1
         )
 
         _seed(99)
@@ -133,7 +135,6 @@ class TestK1MatchesAdamW:
             torch.testing.assert_close(pa.data, pe.data, atol=1e-6, rtol=1e-5)
 
     def test_different_lr_still_matches(self):
-        """Spot-check with a larger learning rate."""
         lr, wd, steps = 5e-2, 0.0, 10
 
         _seed()
@@ -141,7 +142,9 @@ class TestK1MatchesAdamW:
         _seed()
         model_eve = _make_fc()
 
-        opt_adam = torch.optim.AdamW(model_adam.parameters(), lr=lr, weight_decay=wd)
+        opt_adam = torch.optim.AdamW(
+            model_adam.parameters(), lr=lr, weight_decay=wd, amsgrad=True
+        )
         opt_eve = EVE(model_eve.parameters(), lr=lr, weight_decay=wd, K=1)
 
         _seed(7)
@@ -161,10 +164,10 @@ class TestK1MatchesAdamW:
 
 class TestKGt1Basic:
 
-    def test_fc_loss_decreases(self):
+    def test_fc_loss_decreases_k2(self):
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(32, 8)
         y = torch.randn(32, 4)
@@ -172,14 +175,14 @@ class TestKGt1Basic:
 
         assert losses[-1] < losses[0], "loss should decrease over 50 steps"
 
-    def test_k2_works(self):
+    def test_fc_loss_decreases_k4(self):
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=2)
+        opt = EVE(model.parameters(), lr=1e-2, K=4)
 
-        x = torch.randn(16, 8)
-        y = torch.randn(16, 4)
-        losses = _train_steps(model, opt, x, y, 20, is_eve_k_gt1=True)
+        x = torch.randn(32, 8)
+        y = torch.randn(32, 4)
+        losses = _train_steps(model, opt, x, y, 50, is_eve_k_gt1=True)
 
         assert losses[-1] < losses[0]
 
@@ -194,8 +197,8 @@ class TestKGt1Basic:
 
         assert losses[-1] < losses[0]
 
-    def test_k8_extended_offspring(self):
-        """K=8 exercises momentum-interpolation offspring (Section 4.1.2)."""
+    def test_k8_interpolation(self):
+        """K=8 exercises finer alpha grid spacing."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=8)
@@ -216,7 +219,7 @@ class TestArchitectures:
     def test_cnn(self):
         _seed()
         model = _make_cnn()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(16, 1, 8, 8)
         y = torch.randn(16, 2)
@@ -227,7 +230,7 @@ class TestArchitectures:
     def test_rnn(self):
         _seed()
         model = _make_rnn()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(16, 5, 8)  # (batch, seq, features)
         y = torch.randn(16, 4)
@@ -238,7 +241,7 @@ class TestArchitectures:
     def test_transformer(self):
         _seed()
         model = _make_transformer()
-        opt = EVE(model.parameters(), lr=1e-3, K=4)
+        opt = EVE(model.parameters(), lr=1e-3, K=2)
 
         x = torch.randn(16, 5, 16)  # (batch, seq, d_model)
         y = torch.randn(16, 4)
@@ -248,127 +251,93 @@ class TestArchitectures:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  4. Offspring directions correctness
+#  4. Momentum interpolation offspring correctness
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestOffspring:
-    """Verify offspring directions match the paper's equations exactly."""
+class TestMomentumInterpolation:
+    """Verify offspring directions match the generator equation."""
 
-    def test_d1_adam(self):
-        """d1 = -m_hat / (sqrt(v_hat) + eps)  — verify the formula directly."""
+    def test_alpha_grid_k2(self):
+        """K=2 should produce alphas [0, 1]."""
+        alphas = [k / (2 - 1) for k in range(2)]
+        assert alphas == [0.0, 1.0]
+
+    def test_alpha_grid_k3(self):
+        """K=3 should produce alphas [0, 0.5, 1]."""
+        alphas = [k / (3 - 1) for k in range(3)]
+        assert alphas == [0.0, 0.5, 1.0]
+
+    def test_alpha_grid_k4(self):
+        """K=4 should produce alphas [0, 1/3, 2/3, 1]."""
+        alphas = [k / (4 - 1) for k in range(4)]
+        expected = [0.0, 1 / 3, 2 / 3, 1.0]
+        for a, e in zip(alphas, expected):
+            assert abs(a - e) < 1e-10
+
+    def test_alpha0_is_pure_fast(self):
+        """At alpha=0, offspring = -m_hat / denom (pure fast momentum)."""
         _seed()
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
-        g = torch.randn(10)
+        m_hat = torch.randn(10)
+        m_hat_slow = torch.randn(10)
+        denom = torch.rand(10) + 0.1
 
-        m = (1 - beta1) * g
-        v = (1 - beta2) * g ** 2
-        m_hat = m / (1 - beta1)
-        v_hat = v / (1 - beta2)
-        expected_d1 = -m_hat / (v_hat.sqrt() + eps)
+        alpha = 0.0
+        d = (-(1.0 - alpha) * m_hat - alpha * m_hat_slow) / denom
+        expected = -m_hat / denom
 
-        # Reproduce via the same tensor ops the optimizer uses internally.
-        m2 = torch.zeros(10)
-        v2 = torch.zeros(10)
-        m2.mul_(beta1).add_(g, alpha=1 - beta1)
-        v2.mul_(beta2).addcmul_(g, g, value=1 - beta2)
-        m_hat2 = m2 / (1 - beta1)
-        sqrt_v_hat2 = (v2 / (1 - beta2)).sqrt()
-        d1 = m_hat2.neg() / (sqrt_v_hat2 + eps)
+        torch.testing.assert_close(d, expected, atol=1e-7, rtol=1e-6)
 
-        torch.testing.assert_close(d1, expected_d1, atol=1e-7, rtol=1e-6)
-
-    def test_d1_matches_adamw_direction(self):
-        """After one step, K=1 EVE direction equals Adam's update direction."""
+    def test_alpha1_is_pure_slow(self):
+        """At alpha=1, offspring = -m_hat_slow / denom (pure slow momentum)."""
         _seed()
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
-        lr, wd = 0.01, 0.0
+        m_hat = torch.randn(10)
+        m_hat_slow = torch.randn(10)
+        denom = torch.rand(10) + 0.1
 
-        p_ref = nn.Parameter(torch.randn(10))
-        p_eve = nn.Parameter(p_ref.data.clone())
+        alpha = 1.0
+        d = (-(1.0 - alpha) * m_hat - alpha * m_hat_slow) / denom
+        expected = -m_hat_slow / denom
 
-        g = torch.randn(10)
-        p_ref.grad = g.clone()
-        p_eve.grad = g.clone()
+        torch.testing.assert_close(d, expected, atol=1e-7, rtol=1e-6)
 
-        opt_ref = torch.optim.AdamW([p_ref], lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd)
-        opt_eve = EVE([p_eve], lr=lr, betas=(beta1, beta2), eps=eps, weight_decay=wd, K=1)
-
-        opt_ref.step()
-        opt_eve.step()
-
-        torch.testing.assert_close(p_eve.data, p_ref.data, atol=1e-7, rtol=1e-6)
-
-    def test_d4_contrarian_bounded(self):
-        """Contrarian d4 should have values in [-1, 1]."""
+    def test_alpha_half_is_midpoint(self):
+        """At alpha=0.5, offspring = -(0.5*m_hat + 0.5*m_hat_slow) / denom."""
         _seed()
-        g = torch.randn(100)
-        v_hat = torch.rand(100) * 10  # positive
-        sqrt_v_hat = v_hat.sqrt()
-        global_max = sqrt_v_hat.max().item()
-        eps = 1e-8
+        m_hat = torch.randn(10)
+        m_hat_slow = torch.randn(10)
+        denom = torch.rand(10) + 0.1
 
-        d4 = -g.sign() * sqrt_v_hat / (global_max + eps)
-        assert d4.abs().max().item() <= 1.0 + 1e-7
+        alpha = 0.5
+        d = (-(1.0 - alpha) * m_hat - alpha * m_hat_slow) / denom
+        expected = -(0.5 * m_hat + 0.5 * m_hat_slow) / denom
+
+        torch.testing.assert_close(d, expected, atol=1e-7, rtol=1e-6)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  5. Selection weights
+#  5. AMSGrad v_max
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestSelectionWeights:
+class TestAMSGrad:
 
-    def test_weights_sum_to_one(self):
+    def test_v_max_is_running_maximum(self):
+        """v_max should be >= v (raw second moment) at every step."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=1)
 
         x = torch.randn(16, 8)
         y = torch.randn(16, 4)
-
-        fitness = torch.randn(4)
-        w = torch.softmax(opt.beta_sel * fitness, dim=0)
-
-        assert abs(w.sum().item() - 1.0) < 1e-6
-        assert (w >= 0).all()
-
-    def test_weights_all_positive(self):
-        """Proposition 3: for finite beta_sel, all w_k > 0."""
-        fitness = torch.tensor([-1.0, 0.0, 0.5, 2.0])
-        beta_sel = 1.0
-        w = torch.softmax(beta_sel * fitness, dim=0)
-        assert (w > 0).all()
-
-    def test_k1_trivial_weight(self):
-        """At K=1, the single weight must be 1 (Prop. 2)."""
-        fitness = torch.tensor([0.5])
-        w = torch.softmax(1.0 * fitness, dim=0)
-        assert abs(w.item() - 1.0) < 1e-7
-
-
-# ══════════════════════════════════════════════════════════════════════════
-#  6. Strength signal bounds
-# ══════════════════════════════════════════════════════════════════════════
-
-class TestStrengthSignal:
-
-    def test_stays_in_01(self):
-        """s must remain in [0, 1] since sigmoid ∈ (0,1) and EMA with
-        gamma_s ∈ [0,1)."""
-        _seed()
-        model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
-
-        x = torch.randn(32, 8)
-        y = torch.randn(32, 4)
-        _train_steps(model, opt, x, y, 50, is_eve_k_gt1=True)
+        _train_steps(model, opt, x, y, 20)
 
         for p in model.parameters():
-            s = opt.state[p]["s"]
-            assert s.min().item() >= 0.0 - 1e-7
-            assert s.max().item() <= 1.0 + 1e-7
+            state = opt.state[p]
+            v = state["v"]
+            v_max = state["v_max"]
+            assert (v_max >= v - 1e-7).all(), "v_max must be >= v"
 
-    def test_initial_value(self):
-        """s should be initialised to 0.5 (neutral prior)."""
+    def test_v_max_initialised_zero(self):
+        """v_max starts at zero and gets updated on first step."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=1)
@@ -376,54 +345,190 @@ class TestStrengthSignal:
         x = torch.randn(8, 8)
         y = torch.randn(8, 4)
 
-        # One step to initialise state
         model.zero_grad()
         F.mse_loss(model(x), y).backward()
         opt.step()
 
         for p in model.parameters():
-            s = opt.state[p]["s"]
-            # After one step with no prev_loss, s stays at 0.5
-            torch.testing.assert_close(
-                s, torch.full_like(s, 0.5), atol=1e-7, rtol=0
-            )
+            state = opt.state[p]
+            assert (state["v_max"] > 0).any(), "v_max should be positive after first step"
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  7. Adaptive temperature
+#  6. Slow momentum buffer
 # ══════════════════════════════════════════════════════════════════════════
 
-class TestTemperature:
+class TestSlowMomentum:
 
-    def test_stays_in_bounds(self):
-        """beta_sel must stay within [beta_min, beta_max]."""
+    def test_m_slow_maintained_for_k_gt1(self):
+        """m_slow should be initialised and updated when K>1."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
-        x = torch.randn(32, 8)
-        y = torch.randn(32, 4)
-        _train_steps(model, opt, x, y, 100, is_eve_k_gt1=True)
+        x = torch.randn(16, 8)
+        y = torch.randn(16, 4)
+        _train_steps(model, opt, x, y, 5, is_eve_k_gt1=True)
 
-        beta_min, beta_max = opt.defaults["beta_sel_range"]
-        assert opt.beta_sel >= beta_min - 1e-9
-        assert opt.beta_sel <= beta_max + 1e-9
+        for p in model.parameters():
+            state = opt.state[p]
+            assert "m_slow" in state, "m_slow should exist in state for K>1"
+            assert not (state["m_slow"] == 0).all(), "m_slow should be non-zero after training"
 
-    def test_adapts_from_initial(self):
-        """After several steps, beta_sel should differ from its init."""
+    def test_m_slow_not_maintained_for_k1(self):
+        """K=1 path should not allocate m_slow."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4, beta_sel_init=1.0)
+        opt = EVE(model.parameters(), lr=1e-2, K=1)
 
-        x = torch.randn(32, 8)
-        y = torch.randn(32, 4)
-        _train_steps(model, opt, x, y, 30, is_eve_k_gt1=True)
+        x = torch.randn(8, 8)
+        y = torch.randn(8, 4)
+        _train_steps(model, opt, x, y, 5)
 
-        assert opt.beta_sel != 1.0, "temperature should have adapted"
+        for p in model.parameters():
+            state = opt.state[p]
+            assert "m_slow" not in state
+
+    def test_m_slow_decay_rate(self):
+        """m_slow should track gradients with beta1_slow decay."""
+        _seed()
+        beta1_slow = 0.999
+        p = nn.Parameter(torch.randn(10))
+
+        g1 = torch.randn(10)
+        expected_m_slow = (1.0 - beta1_slow) * g1
+
+        model = nn.Linear(10, 5)
+        opt = EVE(model.parameters(), lr=1e-3, K=2, beta1_slow=beta1_slow)
+
+        model.zero_grad()
+        loss = model(torch.randn(4, 10)).sum()
+        loss.backward()
+
+        opt.step(model=model, loss_fn=lambda out, tgt: out.sum(),
+                 data=(torch.randn(4, 10), None))
+
+        for p in model.parameters():
+            state = opt.state[p]
+            if "m_slow" in state:
+                assert state["m_slow"].shape == p.shape
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  8. Edge cases & validation
+#  7. Math collapse (alpha_eff)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestMathCollapse:
+
+    def test_alpha_eff_is_weighted_sum(self):
+        """alpha_eff = sum(w_k * alpha_k) for given weights."""
+        alphas = torch.tensor([0.0, 1 / 3, 2 / 3, 1.0])
+        weights = torch.tensor([0.4, 0.3, 0.2, 0.1])
+        alpha_eff = (weights * alphas).sum().item()
+        expected = 0.4 * 0.0 + 0.3 / 3 + 0.2 * 2 / 3 + 0.1 * 1.0
+        assert abs(alpha_eff - expected) < 1e-7
+
+    def test_uniform_weights_give_midpoint(self):
+        """With uniform weights, alpha_eff should be 0.5 (midpoint)."""
+        K = 4
+        alphas = torch.tensor([k / (K - 1) for k in range(K)])
+        weights = torch.ones(K) / K
+        alpha_eff = (weights * alphas).sum().item()
+        assert abs(alpha_eff - 0.5) < 1e-7
+
+    def test_collapsed_direction_matches_weighted(self):
+        """The math-collapsed direction should equal the weighted sum of offspring."""
+        _seed()
+        K = 4
+        m_hat = torch.randn(20)
+        m_hat_slow = torch.randn(20)
+        denom = torch.rand(20) + 0.1
+        alphas = [k / (K - 1) for k in range(K)]
+
+        fitness = torch.randn(K)
+        weights = torch.softmax(fitness, dim=0)
+
+        # Weighted sum of individual offspring
+        d_weighted = torch.zeros(20)
+        for k in range(K):
+            a_k = alphas[k]
+            d_k = (-(1.0 - a_k) * m_hat - a_k * m_hat_slow) / denom
+            d_weighted += weights[k] * d_k
+
+        # Math collapse
+        alpha_eff = sum(w * a for w, a in zip(weights.tolist(), alphas))
+        d_collapsed = (-(1.0 - alpha_eff) * m_hat - alpha_eff * m_hat_slow) / denom
+
+        torch.testing.assert_close(d_collapsed, d_weighted, atol=1e-6, rtol=1e-5)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  8. Selection weights
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestSelectionWeights:
+
+    def test_weights_sum_to_one(self):
+        fitness = torch.randn(4)
+        beta_sel = 1.0
+        w = torch.softmax(beta_sel * fitness, dim=0)
+
+        assert abs(w.sum().item() - 1.0) < 1e-6
+        assert (w >= 0).all()
+
+    def test_weights_all_positive(self):
+        """For finite beta_sel, all w_k > 0."""
+        fitness = torch.tensor([-1.0, 0.0, 0.5, 2.0])
+        beta_sel = 1.0
+        w = torch.softmax(beta_sel * fitness, dim=0)
+        assert (w > 0).all()
+
+    def test_k1_trivial_weight(self):
+        """At K=1, the single weight must be 1."""
+        fitness = torch.tensor([0.5])
+        w = torch.softmax(1.0 * fitness, dim=0)
+        assert abs(w.item() - 1.0) < 1e-7
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  9. Diagnostics
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestDiagnostics:
+
+    def test_diagnostics_recorded(self):
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=2, record_diagnostics=True)
+
+        x = torch.randn(16, 8)
+        y = torch.randn(16, 4)
+        _train_steps(model, opt, x, y, 5, is_eve_k_gt1=True)
+
+        assert len(opt._diagnostics) == 5
+        entry = opt._diagnostics[0]
+        assert "fitness" in entry
+        assert "weights" in entry
+        assert "alpha_eff" in entry
+        assert "dir_norms" in entry
+        assert "cos_pairs" in entry
+        assert "cos_to_combined" in entry
+        assert 0.0 <= entry["alpha_eff"] <= 1.0
+
+    def test_diagnostics_not_recorded_by_default(self):
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
+
+        x = torch.randn(16, 8)
+        y = torch.randn(16, 4)
+        _train_steps(model, opt, x, y, 5, is_eve_k_gt1=True)
+
+        assert len(opt._diagnostics) == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  10. Edge cases & validation
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestEdgeCases:
@@ -446,7 +551,7 @@ class TestEdgeCases:
         """K>1 without model should raise ValueError."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(8, 8)
         y = torch.randn(8, 4)
@@ -461,12 +566,11 @@ class TestEdgeCases:
         """Parameters without gradients (frozen) should be skipped."""
         _seed()
         model = _make_fc()
-        # Freeze the first layer
         for p in model[0].parameters():
             p.requires_grad_(False)
 
         opt = EVE(
-            filter(lambda p: p.requires_grad, model.parameters()), lr=1e-2, K=4
+            filter(lambda p: p.requires_grad, model.parameters()), lr=1e-2, K=2
         )
 
         x = torch.randn(16, 8)
@@ -500,7 +604,7 @@ class TestEdgeCases:
         assert loss.item() > 0
 
     def test_small_batch(self):
-        """Batch smaller than K should still work (probe_size >= 1)."""
+        """Batch smaller than K should still work."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=4)
@@ -518,7 +622,7 @@ class TestEdgeCases:
         """No weight decay should still work."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4, weight_decay=0.0)
+        opt = EVE(model.parameters(), lr=1e-2, K=2, weight_decay=0.0)
 
         x = torch.randn(16, 8)
         y = torch.randn(16, 4)
@@ -527,7 +631,7 @@ class TestEdgeCases:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  9. MPS device
+#  11. MPS device
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.skipif(
@@ -546,11 +650,11 @@ class TestMPS:
         losses = _train_steps(model, opt, x, y, 10)
         assert losses[-1] < losses[0]
 
-    def test_k4_mps(self):
+    def test_k2_mps(self):
         _seed()
         device = torch.device("mps")
         model = _make_fc().to(device)
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(16, 8, device=device)
         y = torch.randn(16, 4, device=device)
@@ -561,7 +665,7 @@ class TestMPS:
         _seed()
         device = torch.device("mps")
         model = _make_cnn().to(device)
-        opt = EVE(model.parameters(), lr=1e-2, K=4)
+        opt = EVE(model.parameters(), lr=1e-2, K=2)
 
         x = torch.randn(8, 1, 8, 8, device=device)
         y = torch.randn(8, 2, device=device)

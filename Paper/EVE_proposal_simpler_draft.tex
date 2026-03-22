@@ -1,0 +1,147 @@
+\documentclass[12pt]{article}
+
+% ── Packages ───────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[top=1.1in, bottom=1.1in, left=1.25in, right=1.25in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{parskip}
+
+% ── Colors & Hyperref ──────────────────────────────────────────────────────
+\definecolor{accent}{HTML}{2D1B4E}
+\definecolor{accent2}{HTML}{6B3FA0}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=accent2,
+  citecolor=accent,
+  urlcolor=accent2,
+  pdftitle={EVE: Evolutionary Virtual Exploration via Adaptive Momentum Interpolation},
+}
+
+% ── Spacing helpers ────────────────────────────────────────────────────────
+\setlength{\parskip}{8pt}
+\setlength{\parindent}{0pt}
+
+% ══════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+\begin{center}
+  {\color{accent}\LARGE\bfseries EVE}\\[6pt]
+  {\color{accent2}\Large Evolutionary Virtual Exploration via\\[4pt] Adaptive Momentum Interpolation}\\[12pt]
+  {\normalsize\bfseries Research Proposal}\\[6pt]
+\end{center}
+
+\vspace{10pt}
+
+% ── Abstract ───────────────────────────────────────────────────────────────
+\begin{center}
+  {\bfseries Abstract}
+\end{center}
+\noindent
+The Adam optimizer and its decoupled weight decay variant AdamW have become the default optimizers for training deep neural networks. Their success relies on per-parameter adaptive learning rates driven by exponential moving averages of gradient moments. Yet Adam structurally commits to a single update direction at every step. We propose \textbf{EVE} (Evolutionary Virtual Exploration), a lightweight adaptive optimizer that empirically searches the momentum spectrum at runtime. Instead of handcrafted heuristics, EVE generates $K$ candidate offspring directions by interpolating between fast and slow momentum buffers. EVE evaluates these candidates at every step via a forward-only probe on the full training batch and blends them into a single update using temperature-scaled softmax selection. EVE utilizes an AMSGrad-style running maximum to naturally stabilize oscillating dimensions, dynamically generalizing the benefits of Lookahead and Sharpness-Aware Minimization (SAM) through empirical testing rather than rigid scheduling or expensive backward passes.
+
+\vspace{15pt}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Introduction and Motivation}
+\label{sec:intro}
+
+First-order adaptive optimizers like Adam rely on an exponential moving average (EMA) of past gradients (momentum) and squared gradients (variance). While highly effective, committing to a single predetermined trajectory leaves the optimizer blind to local topological hazards. If the fast momentum direction points directly into a sharp minimum or a steep valley wall, the optimizer has no internal mechanism to detect the error prior to taking the step.
+
+Standard interventions typically require rigid external wrappers or massive compute overheads. Lookahead maintains slow and fast weights, periodically pulling the trajectory back to a safer, low-frequency path. Sharpness-Aware Minimization (SAM) seeks flat minima by computing gradients at a worst-case perturbed location, doubling the backward-pass cost. 
+
+EVE introduces a paradigm shift: \textit{empirical strategy selection}. By spanning a continuous spectrum between highly reactive fast momentum and highly stable slow momentum, EVE tests $K$ virtual directions using cheap forward-only passes on the training batch. The result is an optimizer that dynamically tunes its own momentum decay rate based on the immediate topography of the loss landscape, achieving the stabilization of Lookahead and the sharpness-avoidance of SAM without their respective rigidities.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{The EVE Framework}
+\label{sec:method}
+
+EVE extends AdamW through three streamlined mechanisms: a continuous momentum generator equation, probe-based fitness evaluation on the full batch, and a soft selection mechanism.
+
+\subsection{The Momentum Spectrum (Offspring Generation)}
+EVE maintains two first-moment buffers: a fast momentum $m_t$ (standard $\beta_1 = 0.9$) and a slow momentum $m_{t,\mathrm{slow}}$ ($\beta_{1,\mathrm{slow}} = 0.999$) that tracks the long-term, low-frequency trajectory. To address dimension neglect caused by oscillating gradients, EVE adopts the AMSGrad formulation, maintaining a running maximum of the second moment: $\hat{v}^{\max}_t = \max(\hat{v}^{\max}_{t-1}, \hat{v}_t)$.
+
+Rather than defining discrete, handcrafted strategies, EVE generates a brood of $K$ offspring directions by spanning a continuous interpolation parameter $\alpha_k \in [0, 1]$:
+
+\begin{equation}
+  \mathbf{d}_k = - \frac{(1 - \alpha_k)\hat{m}_t + \alpha_k\hat{m}_{t,\mathrm{slow}}}{\sqrt{\hat{v}^{\max}_t} + \varepsilon}
+  \label{eq:generator}
+\end{equation}
+
+For $K=2$, the optimizer simply explores the endpoints: pure fast momentum ($\alpha_1 = 0$) and pure slow momentum ($\alpha_2 = 1$). For $K > 2$, the offspring sweep an arc across the 2D plane defined by the diverging momentum vectors, offering a spectrum of structural stability.
+
+\subsection{Probe-Based Fitness Evaluation}
+At every step, EVE evaluates the viability of each offspring direction via a forward-only probe on the full current training batch $B_t$. To ensure batch noise does not distort the evaluation, the baseline loss acts as a shared control variate:
+
+\begin{equation}
+  \mathcal{F}_k = \mathcal{L}(\theta_t;\, B_t) - \mathcal{L}(\theta_t + \eta\,\mathbf{d}_k;\, B_t)
+  \label{eq:fitness}
+\end{equation}
+
+A positive $\mathcal{F}_k$ indicates the offspring direction successfully reduced the batch loss. Because the baseline noise affects all offspring equally, it cancels out in the relative ranking, preserving a pure geometric signal.
+
+\subsection{Soft Natural Selection and the Math Collapse}
+The fitness values are transformed into a probability distribution over the momentum spectrum using temperature-scaled softmax:
+
+\begin{equation}
+  w_k = \frac{\exp(\beta_{\mathrm{sel}}\mathcal{F}_k)}{\sum_{j=1}^{K} \exp(\beta_{\mathrm{sel}}\mathcal{F}_j)}
+\end{equation}
+
+Because every offspring $\mathbf{d}_k$ is a linear combination of fast and slow momentum, the final updated direction simplifies beautifully. The selection mechanism effectively computes an optimal, dynamic momentum interpolation factor, $\alpha_{\mathrm{eff}} = \sum_{k=1}^K w_k \alpha_k$. The final step becomes:
+
+\begin{equation}
+  \mathbf{d}_{\mathrm{final}} = - \frac{(1 - \alpha_{\mathrm{eff}})\hat{m}_t + \alpha_{\mathrm{eff}}\hat{m}_{t,\mathrm{slow}}}{\sqrt{\hat{v}^{\max}_t} + \varepsilon}
+\end{equation}
+
+The model parameters are then updated with decoupled weight decay: $\theta_{t+1} = \theta_t + \eta \mathbf{d}_{\mathrm{final}} - \eta \lambda \theta_t$.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Hyperparameter Reference}
+\label{sec:hyperparams}
+
+By replacing discrete heuristics with a continuous momentum interpolation, EVE's hyperparameter footprint is vastly reduced. It inherits standard AMSGrad/AdamW parameters and introduces only three operational parameters, all of which possess robust defaults.
+
+\begin{center}
+\small
+\begin{tabular}{@{}llp{8cm}@{}}
+  \toprule
+  Symbol & Default & Description \\
+  \midrule
+  \multicolumn{3}{@{}l}{\textit{Standard (Inherited)}} \\[3pt]
+  $\eta$ & task-dependent & Learning rate [cite: 177] \\
+  $\beta_1$ & $0.9$ & Fast momentum decay [cite: 177] \\
+  $\beta_2$ & $0.999$ & Second moment decay [cite: 177] \\
+  $\varepsilon$ & $10^{-8}$ & Numerical stabilizer [cite: 177] \\
+  $\lambda$ & $0.01$ & Decoupled weight decay [cite: 177] \\[6pt]
+  \multicolumn{3}{@{}l}{\textit{EVE-Specific}} \\[3pt]
+  $K$ & $2$ & Brood size. The number of uniformly spaced points evaluated along the $\alpha$ interpolation grid[cite: 178]. \\
+  $\beta_{1,\mathrm{slow}}$ & $0.999$ & Slow momentum decay. Higher values produce a more rigid, trajectory-smoothing vector[cite: 179]. \\
+  $\beta_{\mathrm{sel}}$ & $1.0$ & Selection temperature for the softmax distribution. Higher values aggressively exploit the fittest offspring; lower values blend them more evenly. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Theoretical Links and Generalization}
+\label{sec:theory}
+
+By stripping away discrete heuristics in favor of a continuous momentum grid, EVE acts as a dynamic generalization of several leading optimization techniques:
+
+\begin{itemize}
+    \item \textbf{Dynamic Lookahead (Ranger):} While standard Lookahead merges fast and slow weights on a fixed, predefined schedule, EVE shifts $\alpha_{\mathrm{eff}}$ toward $1.0$ (slow momentum) precisely when the forward probe detects that the fast trajectory is oscillating poorly.
+    \item \textbf{Implicit Sharpness-Awareness (SAM):} If the fast momentum blindly points into a sharp, narrow minimum, the corresponding perturbation will trigger a local loss spike, yielding terrible fitness for $\alpha=0$. The softmax mechanism automatically down-weights the sharp direction, achieving SAM-like sharpness avoidance empirically without requiring a second backward pass.
+    \item \textbf{Dimension Recovery (AMSGrad):} Incorporating the AMSGrad running maximum into the shared denominator naturally resolves the dimension stalling issue. It prevents the effective learning rate from collapsing on dimensions with highly oscillatory gradients, rendering complex, dedicated ``recovery'' directions unnecessary.
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+\label{sec:conclusion}
+
+EVE reframes multi-candidate optimization not as a collection of disjoint heuristics, but as a mathematically grounded search across a continuous momentum spectrum. By coupling an interpolating generator equation with AMSGrad scaling, EVE achieves the strategic adaptivity of evolutionary methods. This framework provides a unified, purely empirical approach to handling oscillatory valleys and sharp minima, establishing a highly robust drop-in replacement for standard adaptive optimizers.
+
+\end{document}
