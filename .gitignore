@@ -9,3 +9,4 @@ build/
 data/
 *.DS_Store
 .cursor/
+CLAUDE.md
