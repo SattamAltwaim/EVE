@@ -86,11 +86,22 @@ At every step, EVE evaluates the viability of each offspring direction via a for
 A positive $\mathcal{F}_k$ indicates the offspring direction successfully reduced the batch loss. Because the baseline noise affects all offspring equally, it cancels out in the relative ranking, preserving a pure geometric signal.
 
 \subsection{Soft Natural Selection and the Math Collapse}
-The fitness values are transformed into a probability distribution over the momentum spectrum using temperature-scaled softmax:
+Because the raw fitness magnitudes depend on learning rate and model scale, the fitness vector is first range-normalized to decouple the selection temperature from these factors:
 
 \begin{equation}
-  w_k = \frac{\exp(\beta_{\mathrm{sel}}\mathcal{F}_k)}{\sum_{j=1}^{K} \exp(\beta_{\mathrm{sel}}\mathcal{F}_j)}
+  \Delta\mathcal{F} = \max_j \mathcal{F}_j - \min_j \mathcal{F}_j, \qquad
+  \bar{\mathcal{F}}_k = \frac{\mathcal{F}_k}{\max(\Delta\mathcal{F},\;\varepsilon)}
+  \label{eq:fitness-norm}
 \end{equation}
+
+The normalized fitness values are then transformed into a probability distribution over the momentum spectrum using temperature-scaled softmax:
+
+\begin{equation}
+  w_k = \frac{\exp(\beta_{\mathrm{sel}}\,\bar{\mathcal{F}}_k)}{\sum_{j=1}^{K} \exp(\beta_{\mathrm{sel}}\,\bar{\mathcal{F}}_j)}
+  \label{eq:selection}
+\end{equation}
+
+This normalization ensures that $\beta_{\mathrm{sel}}$ operates on a unit-scale fitness spread regardless of learning rate, model size, or training phase, making it a true scale-invariant selection temperature.
 
 Because every offspring $\mathbf{d}_k$ is a linear combination of fast and slow momentum, the final updated direction simplifies beautifully. The selection mechanism effectively computes an optimal, dynamic momentum interpolation factor, $\alpha_{\mathrm{eff}} = \sum_{k=1}^K w_k \alpha_k$. The final step becomes:
 
@@ -121,7 +132,7 @@ By replacing discrete heuristics with a continuous momentum interpolation, EVE's
   \multicolumn{3}{@{}l}{\textit{EVE-Specific}} \\[3pt]
   $K$ & $2$ & Brood size. The number of uniformly spaced points evaluated along the $\alpha$ interpolation grid[cite: 178]. \\
   $\beta_{1,\mathrm{slow}}$ & $0.999$ & Slow momentum decay. Higher values produce a more rigid, trajectory-smoothing vector[cite: 179]. \\
-  $\beta_{\mathrm{sel}}$ & $1.0$ & Selection temperature for the softmax distribution. Higher values aggressively exploit the fittest offspring; lower values blend them more evenly. \\
+  $\beta_{\mathrm{sel}}$ & $1.0$ & Scale-invariant selection temperature applied after range normalization of the fitness vector. Higher values aggressively exploit the fittest offspring; lower values blend them more evenly. Because fitness is normalized to unit range, $\beta_{\mathrm{sel}}=1$ produces moderate differentiation regardless of learning rate or model scale. \\
   \bottomrule
 \end{tabular}
 \end{center}

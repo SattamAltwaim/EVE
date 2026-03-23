@@ -490,6 +490,70 @@ class TestSelectionWeights:
         assert abs(w.item() - 1.0) < 1e-7
 
 
+class TestFitnessNormalization:
+    """Range normalization makes selection scale-invariant."""
+
+    @staticmethod
+    def _normalized_weights(fitness, beta_sel=1.0):
+        fitness_range = (fitness.max() - fitness.min()).clamp(min=1e-8)
+        return torch.softmax(beta_sel * fitness / fitness_range, dim=0)
+
+    def test_identical_fitness_gives_uniform(self):
+        """When all offspring have the same fitness, weights must be uniform."""
+        fitness = torch.tensor([0.005, 0.005, 0.005, 0.005])
+        w = self._normalized_weights(fitness, beta_sel=10.0)
+        assert torch.allclose(w, torch.ones(4) / 4, atol=1e-6)
+
+    def test_zero_fitness_gives_uniform(self):
+        fitness = torch.zeros(4)
+        w = self._normalized_weights(fitness, beta_sel=100.0)
+        assert torch.allclose(w, torch.ones(4) / 4, atol=1e-6)
+
+    def test_scale_invariance(self):
+        """Scaling all fitness by a constant must not change the weights."""
+        fitness = torch.tensor([0.01, 0.007, 0.003, 0.001])
+        w1 = self._normalized_weights(fitness, beta_sel=1.0)
+
+        w2 = self._normalized_weights(fitness * 1e-3, beta_sel=1.0)
+        w3 = self._normalized_weights(fitness * 100.0, beta_sel=1.0)
+
+        torch.testing.assert_close(w1, w2, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(w1, w3, atol=1e-6, rtol=1e-5)
+
+    def test_normalized_weights_sum_to_one(self):
+        fitness = torch.tensor([0.009, 0.006, 0.003, 0.0005])
+        w = self._normalized_weights(fitness, beta_sel=5.0)
+        assert abs(w.sum().item() - 1.0) < 1e-6
+        assert (w > 0).all()
+
+    def test_higher_beta_sel_increases_differentiation(self):
+        """Higher beta_sel should make the weight distribution more peaked."""
+        fitness = torch.tensor([0.01, 0.007, 0.003, 0.001])
+        w_low = self._normalized_weights(fitness, beta_sel=1.0)
+        w_high = self._normalized_weights(fitness, beta_sel=10.0)
+        range_low = (w_low.max() - w_low.min()).item()
+        range_high = (w_high.max() - w_high.min()).item()
+        assert range_high > range_low
+
+    def test_integrated_with_optimizer(self):
+        """EVE with K>1 should produce non-uniform weights with beta_sel=1."""
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=4, beta_sel=1.0,
+                  record_diagnostics=True)
+
+        x = torch.randn(32, 8)
+        y = torch.randn(32, 4)
+        _train_steps(model, opt, x, y, 10, is_eve_k_gt1=True)
+
+        for entry in opt._diagnostics[2:]:
+            w = entry["weights"]
+            weight_range = max(w) - min(w)
+            assert weight_range > 0.01, (
+                f"Weights too uniform after normalization: {w}"
+            )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  9. Diagnostics
 # ══════════════════════════════════════════════════════════════════════════

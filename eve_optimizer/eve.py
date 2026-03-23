@@ -279,7 +279,8 @@ class EVE(torch.optim.Optimizer):
 
         # ── Phase 4: soft selection + math collapse (Eqs. 3–4) ────────
         beta_sel = self.defaults["beta_sel"]
-        weights = torch.softmax(beta_sel * fitness, dim=0)
+        fitness_range = (fitness.max() - fitness.min()).clamp(min=1e-8)
+        weights = torch.softmax(beta_sel * fitness / fitness_range, dim=0)
 
         alphas_t = torch.tensor(alphas, device=weights.device, dtype=weights.dtype)
         alpha_eff: float = (weights * alphas_t).sum().item()
