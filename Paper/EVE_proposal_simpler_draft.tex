@@ -103,6 +103,13 @@ The normalized fitness values are then transformed into a probability distributi
 
 This normalization ensures that $\beta_{\mathrm{sel}}$ operates on a unit-scale fitness spread regardless of learning rate, model size, or training phase, making it a true scale-invariant selection temperature.
 
+\paragraph{Temperature scheduling.}
+Rather than fixing $\beta_{\mathrm{sel}}$ for the entire run, it can be annealed over training to transition from exploration to exploitation. A low initial temperature encourages broad, near-uniform blending of offspring early in training when the loss landscape is poorly explored, while a high final temperature focuses on the fittest offspring once the optimizer has settled into a promising region. EVE provides two built-in schedules: a \emph{step schedule} that multiplies $\beta_{\mathrm{sel}}$ by a constant factor at fixed epoch intervals, and a \emph{cosine schedule} that smoothly sweeps from $\beta_{\mathrm{sel,init}}$ to $\beta_{\mathrm{sel,max}}$ following a half-cosine curve over $T_{\max}$ epochs:
+\begin{equation}
+  \beta_{\mathrm{sel}}(t) = \beta_{\mathrm{sel,init}} + \frac{\beta_{\mathrm{sel,max}} - \beta_{\mathrm{sel,init}}}{2}\left(1 - \cos\!\left(\frac{\pi\, t}{T_{\max}}\right)\right)
+  \label{eq:temp-schedule}
+\end{equation}
+
 Because every offspring $\mathbf{d}_k$ is a linear combination of fast and slow momentum, the final updated direction simplifies beautifully. The selection mechanism effectively computes an optimal, dynamic momentum interpolation factor, $\alpha_{\mathrm{eff}} = \sum_{k=1}^K w_k \alpha_k$. The final step becomes:
 
 \begin{equation}

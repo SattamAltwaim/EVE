@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from eve_optimizer import EVE
+from eve_optimizer import EVE, StepBetaSel, CosineAnnealingBetaSel
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -735,3 +735,92 @@ class TestMPS:
         y = torch.randn(8, 2, device=device)
         losses = _train_steps(model, opt, x, y, 10, is_eve_k_gt1=True)
         assert all(math.isfinite(l) for l in losses)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  12. Beta-sel temperature schedulers
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestBetaSelSchedulers:
+
+    def _make_opt(self, beta_sel=0.5):
+        _seed()
+        model = _make_fc()
+        return EVE(model.parameters(), lr=1e-2, K=2, beta_sel=beta_sel)
+
+    def test_cosine_start_end(self):
+        """Cosine scheduler starts at init and ends at max."""
+        opt = self._make_opt(beta_sel=0.5)
+        sched = CosineAnnealingBetaSel(opt, T_max=100, beta_sel_max=5.0)
+
+        assert abs(opt.defaults["beta_sel"] - 0.5) < 1e-7
+
+        for _ in range(100):
+            sched.step()
+        assert abs(opt.defaults["beta_sel"] - 5.0) < 1e-6
+
+    def test_cosine_monotonic(self):
+        """Cosine schedule is non-decreasing when max > init."""
+        opt = self._make_opt(beta_sel=0.5)
+        sched = CosineAnnealingBetaSel(opt, T_max=50, beta_sel_max=5.0)
+
+        prev = opt.defaults["beta_sel"]
+        for _ in range(50):
+            sched.step()
+            curr = opt.defaults["beta_sel"]
+            assert curr >= prev - 1e-9
+            prev = curr
+
+    def test_step_schedule(self):
+        """Step scheduler holds constant then jumps by gamma."""
+        opt = self._make_opt(beta_sel=1.0)
+        sched = StepBetaSel(opt, step_size=5, gamma=2.0, beta_sel_max=100.0)
+
+        assert abs(opt.defaults["beta_sel"] - 1.0) < 1e-7
+
+        for _ in range(4):
+            sched.step()
+        assert abs(opt.defaults["beta_sel"] - 1.0) < 1e-7
+
+        sched.step()
+        assert abs(opt.defaults["beta_sel"] - 2.0) < 1e-7
+
+        for _ in range(5):
+            sched.step()
+        assert abs(opt.defaults["beta_sel"] - 4.0) < 1e-7
+
+    def test_step_clamp(self):
+        """Step scheduler never exceeds beta_sel_max."""
+        opt = self._make_opt(beta_sel=1.0)
+        sched = StepBetaSel(opt, step_size=2, gamma=3.0, beta_sel_max=5.0)
+
+        for _ in range(20):
+            sched.step()
+        assert opt.defaults["beta_sel"] <= 5.0 + 1e-9
+
+    def test_state_dict_roundtrip(self):
+        """Save/load preserves scheduler state."""
+        opt = self._make_opt(beta_sel=0.5)
+        sched = CosineAnnealingBetaSel(opt, T_max=80, beta_sel_max=5.0)
+
+        for _ in range(30):
+            sched.step()
+        saved_val = opt.defaults["beta_sel"]
+        sd = sched.state_dict()
+
+        opt2 = self._make_opt(beta_sel=0.5)
+        sched2 = CosineAnnealingBetaSel(opt2, T_max=80, beta_sel_max=5.0)
+        sched2.load_state_dict(sd)
+
+        assert abs(opt2.defaults["beta_sel"] - saved_val) < 1e-9
+        assert sched2.last_epoch == 30
+
+    def test_optimizer_defaults_updated(self):
+        """After step(), optimizer.defaults['beta_sel'] reflects new value."""
+        opt = self._make_opt(beta_sel=1.0)
+        sched = CosineAnnealingBetaSel(opt, T_max=10, beta_sel_max=10.0)
+
+        sched.step()
+        val = opt.defaults["beta_sel"]
+        assert val > 1.0, "beta_sel should increase after first step"
+        assert abs(val - sched.get_last_beta_sel()) < 1e-9
