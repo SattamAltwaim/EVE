@@ -298,17 +298,91 @@ class TestOffspring:
 
         torch.testing.assert_close(p_eve.data, p_ref.data, atol=1e-7, rtol=1e-6)
 
-    def test_d4_contrarian_bounded(self):
-        """Contrarian d4 should have values in [-1, 1]."""
+    def test_d2_slow_momentum(self):
+        """d2 = -m_hat_slow / (sqrt(v_hat) + eps), using bias-corrected slow momentum."""
         _seed()
-        g = torch.randn(100)
-        v_hat = torch.rand(100) * 10  # positive
-        sqrt_v_hat = v_hat.sqrt()
-        global_max = sqrt_v_hat.max().item()
-        eps = 1e-8
+        beta1_slow, beta2, eps = 0.999, 0.999, 1e-8
+        g = torch.randn(10)
 
-        d4 = -g.sign() * sqrt_v_hat / (global_max + eps)
-        assert d4.abs().max().item() <= 1.0 + 1e-7
+        m_slow = (1 - beta1_slow) * g
+        v = (1 - beta2) * g ** 2
+        m_hat_slow = m_slow / (1 - beta1_slow)
+        v_hat = v / (1 - beta2)
+        expected_d2 = -m_hat_slow / (v_hat.sqrt() + eps)
+
+        m_slow2 = torch.zeros(10)
+        v2 = torch.zeros(10)
+        m_slow2.mul_(beta1_slow).add_(g, alpha=1 - beta1_slow)
+        v2.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+        m_hat_slow2 = m_slow2 / (1 - beta1_slow)
+        sqrt_v_hat2 = (v2 / (1 - beta2)).sqrt()
+        d2 = m_hat_slow2.neg() / (sqrt_v_hat2 + eps)
+
+        torch.testing.assert_close(d2, expected_d2, atol=1e-7, rtol=1e-6)
+
+    def test_d3_interpolated_complementary(self):
+        """d3 = -[alpha * m_hat + (1-alpha) * g] * (1 - s) / (sqrt(v_hat) + eps)."""
+        _seed()
+        beta1, beta2, eps, alpha = 0.9, 0.999, 1e-8, 0.5
+        g = torch.randn(10)
+        s = torch.rand(10)
+
+        m = (1 - beta1) * g
+        v = (1 - beta2) * g ** 2
+        m_hat = m / (1 - beta1)
+        v_hat = v / (1 - beta2)
+        blended = alpha * m_hat + (1 - alpha) * g
+        expected_d3 = -(blended * (1 - s)) / (v_hat.sqrt() + eps)
+
+        m2 = torch.zeros(10)
+        v2 = torch.zeros(10)
+        m2.mul_(beta1).add_(g, alpha=1 - beta1)
+        v2.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+        m_hat2 = m2 / (1 - beta1)
+        sqrt_v_hat2 = (v2 / (1 - beta2)).sqrt()
+        blended2 = alpha * m_hat2 + (1 - alpha) * g
+        d3 = (blended2.neg() * (1.0 - s)) / (sqrt_v_hat2 + eps)
+
+        torch.testing.assert_close(d3, expected_d3, atol=1e-7, rtol=1e-6)
+
+    def test_d4_virtual_sam(self):
+        """d4 = d1 + gamma * sign(g), where gamma = sam_rho * lr."""
+        _seed()
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        sam_rho, lr = 0.01, 1e-3
+        g = torch.randn(100)
+
+        m = (1 - beta1) * g
+        v = (1 - beta2) * g ** 2
+        m_hat = m / (1 - beta1)
+        v_hat = v / (1 - beta2)
+        d1 = -m_hat / (v_hat.sqrt() + eps)
+
+        gamma = sam_rho * lr
+        d4 = d1 + gamma * g.sign()
+
+        # The SAM perturbation is exactly gamma * sign(g)
+        perturbation = d4 - d1
+        expected_perturbation = gamma * g.sign()
+        torch.testing.assert_close(perturbation, expected_perturbation, atol=1e-7, rtol=1e-6)
+
+    def test_m_slow_buffer_exists(self):
+        """After one K=1 step, m_slow buffer should exist and be non-zero."""
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=1)
+
+        x = torch.randn(8, 8)
+        y = torch.randn(8, 4)
+
+        model.zero_grad()
+        F.mse_loss(model(x), y).backward()
+        opt.step()
+
+        for p in model.parameters():
+            assert "m_slow" in opt.state[p]
+            assert opt.state[p]["m_slow"].shape == p.shape
+            assert opt.state[p]["m_slow"].abs().sum().item() > 0
 
 
 # ══════════════════════════════════════════════════════════════════════════

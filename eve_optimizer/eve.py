@@ -44,6 +44,11 @@ class EVE(torch.optim.Optimizer):
         eps: numerical stabiliser (epsilon).
         weight_decay: decoupled weight decay coefficient (lambda).
         K: brood size — number of offspring directions.
+        beta1_slow: decay rate for the slow momentum buffer used by d2.
+        alpha: momentum interpolation coefficient for d3.
+            alpha=1 gives pure momentum; alpha=0 gives pure gradient.
+        sam_rho: SAM perturbation scale coefficient for d4.
+            Actual gamma = sam_rho * lr per parameter group.
         gamma_s: strength-signal decay rate.
         rho: target entropy ratio for adaptive temperature (0 = pure
             exploitation, 1 = pure exploration).
@@ -62,6 +67,9 @@ class EVE(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.01,
         K: int = 4,
+        beta1_slow: float = 0.999,
+        alpha: float = 0.5,
+        sam_rho: float = 0.01,
         gamma_s: float = 0.99,
         rho: float = 0.5,
         alpha_beta: float = 0.01,
@@ -86,6 +94,9 @@ class EVE(torch.optim.Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             K=K,
+            beta1_slow=beta1_slow,
+            alpha=alpha,
+            sam_rho=sam_rho,
             gamma_s=gamma_s,
             rho=rho,
             alpha_beta=alpha_beta,
@@ -174,6 +185,7 @@ class EVE(torch.optim.Optimizer):
         if K == 1:
             for group in self.param_groups:
                 beta1, beta2 = group["betas"]
+                beta1_slow = group["beta1_slow"]
                 eps = group["eps"]
                 lr = group["lr"]
                 wd = group["weight_decay"]
@@ -191,6 +203,9 @@ class EVE(torch.optim.Optimizer):
                         state["v"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format
                         )
+                        state["m_slow"] = torch.zeros_like(
+                            p, memory_format=torch.preserve_format
+                        )
                         state["s"] = torch.full_like(p, 0.5)
 
                     state["step"] += 1
@@ -198,6 +213,11 @@ class EVE(torch.optim.Optimizer):
 
                     m.mul_(beta1).add_(p.grad, alpha=1.0 - beta1)
                     v.mul_(beta2).addcmul_(p.grad, p.grad, value=1.0 - beta2)
+
+                    # Maintain slow momentum even at K=1 for readiness.
+                    state["m_slow"].mul_(beta1_slow).add_(
+                        p.grad, alpha=1.0 - beta1_slow
+                    )
 
                     bc1 = 1.0 - beta1 ** state["step"]
                     step_size = lr / bc1
@@ -238,6 +258,7 @@ class EVE(torch.optim.Optimizer):
         #     sync for every parameter (Fix Bug 1).
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
+            beta1_slow = group["beta1_slow"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -254,6 +275,9 @@ class EVE(torch.optim.Optimizer):
                     state["v"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
+                    state["m_slow"] = torch.zeros_like(
+                        p, memory_format=torch.preserve_format
+                    )
                     state["s"] = torch.full_like(p, 0.5)
                     state["prev_update_sign"] = torch.zeros_like(p)
 
@@ -262,6 +286,9 @@ class EVE(torch.optim.Optimizer):
 
                 m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                state["m_slow"].mul_(beta1_slow).add_(
+                    grad, alpha=1.0 - beta1_slow
+                )
 
                 bc2 = 1.0 - beta2 ** state["step"]
                 sqrt_v_hat = (v / bc2).sqrt()
@@ -269,12 +296,6 @@ class EVE(torch.optim.Optimizer):
 
                 ptr_to_lr[p.data_ptr()] = group["lr"]
                 params_with_grad.append((group, p))
-
-        # Single GPU reduction across all parameters — one .item() sync
-        # instead of one per parameter (Fix Bug 1).
-        global_max_sqrt_v: float = torch.stack(
-            [sv.max() for sv in sqrt_v_hat_map.values()]
-        ).max().item()
 
         # 2b. Second pass — construct offspring directions (Eqs. 7–10).
         #     Stacked into a (K, *shape) tensor per parameter for the
@@ -285,6 +306,9 @@ class EVE(torch.optim.Optimizer):
             eps = group["eps"]
             grp_K = group["K"]
             beta1 = group["betas"][0]
+            beta1_slow_val = group["beta1_slow"]
+            alpha_interp = group["alpha"]
+            sam_rho_val = group["sam_rho"]
             m, s = state["m"], state["s"]
 
             bc1 = 1.0 - beta1 ** state["step"]
@@ -294,24 +318,27 @@ class EVE(torch.optim.Optimizer):
 
             directions: List[Tensor] = []
 
-            # d1 — Adam (Eq. 7)
-            directions.append(m_hat.neg() / denom)
+            # d1 — Adam / Baseline (Eq. 7)
+            d1 = m_hat.neg() / denom
+            directions.append(d1)
 
             if grp_K >= 2:
-                # d2 — Gradient (Eq. 8)
-                directions.append(grad.neg() / denom)
+                # d2 — Slow Momentum (Eq. 8)
+                bc1_slow = 1.0 - beta1_slow_val ** state["step"]
+                m_hat_slow = state["m_slow"] / bc1_slow
+                directions.append(m_hat_slow.neg() / denom)
 
             if grp_K >= 3:
-                # d3 — Complementary (Eq. 9)
-                directions.append((grad.neg() * (1.0 - s)) / denom)
+                # d3 — Interpolated Complementary (Eq. 9)
+                blended = alpha_interp * m_hat + (1.0 - alpha_interp) * grad
+                directions.append((blended.neg() * (1.0 - s)) / denom)
 
             if grp_K >= 4:
-                # d4 — Contrarian (Eq. 10)
-                directions.append(
-                    grad.sign().neg() * (sqrt_v_hat / (global_max_sqrt_v + eps))
-                )
+                # d4 — Virtual SAM (Eq. 10)
+                gamma = sam_rho_val * group["lr"]
+                directions.append(d1 + gamma * grad.sign())
 
-            # Extended offspring for K > 4 (Section 4.1.2)
+            # Extended offspring for K > 4
             if grp_K > 4:
                 for j in range(1, grp_K - 3):
                     alpha_j = j / (grp_K - 3)

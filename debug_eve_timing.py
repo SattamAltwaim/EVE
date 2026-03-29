@@ -160,13 +160,14 @@ def timed_eve_step(
     timing["P_str  strength signal"].append((t_str - t0) * 1e3)
     mem_log["after_P_str"].append(mem_mb())
 
-    # ── P2a: moments + single global_max_sqrt_v ───────────────────────────────
+    # ── P2a: moments ────────────────────────────────────────────────────────────
     sqrt_v_hat_map: Dict[int, torch.Tensor] = {}
     params_with_grad: List[Tuple[Dict, torch.Tensor]] = []
 
     cuda_sync(); t2a_s = time.perf_counter()
     for group in opt.param_groups:
         beta1, beta2 = group["betas"]
+        beta1_slow = group["beta1_slow"]
         for p in group["params"]:
             if p.grad is None:
                 continue
@@ -175,20 +176,21 @@ def timed_eve_step(
                 state["step"] = 0
                 state["m"] = torch.zeros_like(p)
                 state["v"] = torch.zeros_like(p)
+                state["m_slow"] = torch.zeros_like(p)
                 state["s"] = torch.full_like(p, 0.5)
                 state["prev_update_sign"] = torch.zeros_like(p)
             state["step"] += 1
             m, v = state["m"], state["v"]
             m.mul_(beta1).add_(p.grad, alpha=1.0 - beta1)
             v.mul_(beta2).addcmul_(p.grad, p.grad, value=1.0 - beta2)
+            state["m_slow"].mul_(beta1_slow).add_(
+                p.grad, alpha=1.0 - beta1_slow
+            )
             bc2 = 1.0 - beta2 ** state["step"]
-            sv = (v / bc2).sqrt()          # ← allocates ~same-shape tensor
+            sv = (v / bc2).sqrt()
             sqrt_v_hat_map[p.data_ptr()] = sv
             params_with_grad.append((group, p))
 
-    global_max_sqrt_v: float = torch.stack(
-        [sv.max() for sv in sqrt_v_hat_map.values()]
-    ).max().item()
     cuda_sync(); t2a = time.perf_counter()
     timing["P2a    moments + global_max_sqrt_v"].append((t2a - t2a_s) * 1e3)
     mem_log["after_P2a"].append(mem_mb())
@@ -203,19 +205,27 @@ def timed_eve_step(
         eps   = group["eps"]
         grp_K = group["K"]
         beta1 = group["betas"][0]
+        beta1_slow_val = group["beta1_slow"]
+        alpha_interp = group["alpha"]
+        sam_rho_val = group["sam_rho"]
         m, s  = state["m"], state["s"]
         bc1   = 1.0 - beta1 ** state["step"]
         m_hat = m / bc1
         sv    = sqrt_v_hat_map[p.data_ptr()]
         denom = sv + eps
-        dirs  = [m_hat.neg() / denom]
+        d1    = m_hat.neg() / denom
+        dirs  = [d1]
         if grp_K >= 2:
-            dirs.append(grad.neg() / denom)
+            bc1_slow = 1.0 - beta1_slow_val ** state["step"]
+            m_hat_slow = state["m_slow"] / bc1_slow
+            dirs.append(m_hat_slow.neg() / denom)
         if grp_K >= 3:
-            dirs.append((grad.neg() * (1.0 - s)) / denom)
+            blended = alpha_interp * m_hat + (1.0 - alpha_interp) * grad
+            dirs.append((blended.neg() * (1.0 - s)) / denom)
         if grp_K >= 4:
-            dirs.append(grad.sign().neg() * (sv / (global_max_sqrt_v + eps)))
-        offspring_map[p.data_ptr()] = torch.stack(dirs)  # ← K×shape allocation
+            gamma = sam_rho_val * group["lr"]
+            dirs.append(d1 + gamma * grad.sign())
+        offspring_map[p.data_ptr()] = torch.stack(dirs)
     cuda_sync(); t2b = time.perf_counter()
     timing["P2b    offspring construction"].append((t2b - t2b_s) * 1e3)
     mem_log["after_P2b"].append(mem_mb())
