@@ -298,25 +298,25 @@ class TestOffspring:
 
         torch.testing.assert_close(p_eve.data, p_ref.data, atol=1e-7, rtol=1e-6)
 
-    def test_d2_slow_momentum(self):
-        """d2 = -m_hat_slow / (sqrt(v_hat) + eps), using bias-corrected slow momentum."""
+    def test_d2_sign_momentum(self):
+        """d2 = -sign(m_hat) / (sqrt(v_hat) + eps)."""
         _seed()
-        beta1_slow, beta2, eps = 0.999, 0.999, 1e-8
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
         g = torch.randn(10)
 
-        m_slow = (1 - beta1_slow) * g
+        m = (1 - beta1) * g
         v = (1 - beta2) * g ** 2
-        m_hat_slow = m_slow / (1 - beta1_slow)
+        m_hat = m / (1 - beta1)
         v_hat = v / (1 - beta2)
-        expected_d2 = -m_hat_slow / (v_hat.sqrt() + eps)
+        expected_d2 = -torch.sign(m_hat) / (v_hat.sqrt() + eps)
 
-        m_slow2 = torch.zeros(10)
+        m2 = torch.zeros(10)
         v2 = torch.zeros(10)
-        m_slow2.mul_(beta1_slow).add_(g, alpha=1 - beta1_slow)
+        m2.mul_(beta1).add_(g, alpha=1 - beta1)
         v2.mul_(beta2).addcmul_(g, g, value=1 - beta2)
-        m_hat_slow2 = m_slow2 / (1 - beta1_slow)
+        m_hat2 = m2 / (1 - beta1)
         sqrt_v_hat2 = (v2 / (1 - beta2)).sqrt()
-        d2 = m_hat_slow2.neg() / (sqrt_v_hat2 + eps)
+        d2 = torch.sign(m_hat2).neg() / (sqrt_v_hat2 + eps)
 
         torch.testing.assert_close(d2, expected_d2, atol=1e-7, rtol=1e-6)
 
@@ -346,10 +346,10 @@ class TestOffspring:
         torch.testing.assert_close(d3, expected_d3, atol=1e-7, rtol=1e-6)
 
     def test_d4_virtual_sam(self):
-        """d4 = d1 + gamma * sign(g), where gamma = sam_rho * lr."""
+        """d4 = d1 + sam_gamma * sign(g), with absolute gamma (not lr-scaled)."""
         _seed()
         beta1, beta2, eps = 0.9, 0.999, 1e-8
-        sam_rho, lr = 0.01, 1e-3
+        sam_gamma = 0.05
         g = torch.randn(100)
 
         m = (1 - beta1) * g
@@ -358,16 +358,14 @@ class TestOffspring:
         v_hat = v / (1 - beta2)
         d1 = -m_hat / (v_hat.sqrt() + eps)
 
-        gamma = sam_rho * lr
-        d4 = d1 + gamma * g.sign()
+        d4 = d1 + sam_gamma * g.sign()
 
-        # The SAM perturbation is exactly gamma * sign(g)
         perturbation = d4 - d1
-        expected_perturbation = gamma * g.sign()
+        expected_perturbation = sam_gamma * g.sign()
         torch.testing.assert_close(perturbation, expected_perturbation, atol=1e-7, rtol=1e-6)
 
-    def test_m_slow_buffer_exists(self):
-        """After one K=1 step, m_slow buffer should exist and be non-zero."""
+    def test_no_m_slow_buffer(self):
+        """m_slow buffer was removed; state should only have m, v, s."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=1)
@@ -380,9 +378,9 @@ class TestOffspring:
         opt.step()
 
         for p in model.parameters():
-            assert "m_slow" in opt.state[p]
-            assert opt.state[p]["m_slow"].shape == p.shape
-            assert opt.state[p]["m_slow"].abs().sum().item() > 0
+            assert "m_slow" not in opt.state[p]
+            assert "m" in opt.state[p]
+            assert "v" in opt.state[p]
 
 
 # ══════════════════════════════════════════════════════════════════════════

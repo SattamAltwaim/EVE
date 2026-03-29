@@ -1,20 +1,21 @@
 """
 EVE — Evolutionary Virtual Exploration optimizer.
 
-Faithful implementation of every equation in the EVE paper draft:
-  - Offspring direction construction  (Eqs. 7–10, Section 4.1)
-  - Probe-based fitness evaluation    (Eq. 14,    Section 4.2)
-  - Soft natural selection            (Eq. 18,    Section 4.3)
-  - EVE parameter update              (Eq. 20,    Section 4.3)
-  - Strength signal                   (Eq. 25,    Section 4.4)
-  - Adaptive selection temperature    (Eq. 26,    Section 4.5)
+Offspring direction construction:
+  - d1: AdamW baseline direction
+  - d2: Sign momentum — sign(m_hat) / denom (uniform-magnitude alternative)
+  - d3: Interpolated complementary with strength signal
+  - d4: Virtual SAM perturbation (absolute gamma, not lr-scaled)
+  - Probe-based fitness evaluation
+  - Soft natural selection with adaptive temperature
+  - Strength signal for per-dimension memory
 
 At K=1 the optimizer is *exactly* AdamW with zero overhead.
 
-Probe implementation uses in-place perturbation (perturb → forward → restore),
+Probe implementation uses in-place perturbation (perturb -> forward -> restore),
 which avoids functional_call/vmap overhead and handles BatchNorm models
 correctly. Expected overhead:
-  - sub-batch probe  (|B'| = |B|/K): ~33%  (paper's design, Proposition 1)
+  - sub-batch probe  (|B'| = |B|/K): ~33%
   - full-batch probe (|B'| = |B|):   ~133% for K=4
 """
 
@@ -44,11 +45,9 @@ class EVE(torch.optim.Optimizer):
         eps: numerical stabiliser (epsilon).
         weight_decay: decoupled weight decay coefficient (lambda).
         K: brood size — number of offspring directions.
-        beta1_slow: decay rate for the slow momentum buffer used by d2.
         alpha: momentum interpolation coefficient for d3.
             alpha=1 gives pure momentum; alpha=0 gives pure gradient.
-        sam_rho: SAM perturbation scale coefficient for d4.
-            Actual gamma = sam_rho * lr per parameter group.
+        sam_gamma: absolute SAM perturbation magnitude for d4.
         gamma_s: strength-signal decay rate.
         rho: target entropy ratio for adaptive temperature (0 = pure
             exploitation, 1 = pure exploration).
@@ -67,9 +66,8 @@ class EVE(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.01,
         K: int = 4,
-        beta1_slow: float = 0.999,
         alpha: float = 0.5,
-        sam_rho: float = 0.01,
+        sam_gamma: float = 0.05,
         gamma_s: float = 0.99,
         rho: float = 0.5,
         alpha_beta: float = 0.01,
@@ -94,9 +92,8 @@ class EVE(torch.optim.Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             K=K,
-            beta1_slow=beta1_slow,
             alpha=alpha,
-            sam_rho=sam_rho,
+            sam_gamma=sam_gamma,
             gamma_s=gamma_s,
             rho=rho,
             alpha_beta=alpha_beta,
@@ -185,7 +182,6 @@ class EVE(torch.optim.Optimizer):
         if K == 1:
             for group in self.param_groups:
                 beta1, beta2 = group["betas"]
-                beta1_slow = group["beta1_slow"]
                 eps = group["eps"]
                 lr = group["lr"]
                 wd = group["weight_decay"]
@@ -203,9 +199,6 @@ class EVE(torch.optim.Optimizer):
                         state["v"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format
                         )
-                        state["m_slow"] = torch.zeros_like(
-                            p, memory_format=torch.preserve_format
-                        )
                         state["s"] = torch.full_like(p, 0.5)
 
                     state["step"] += 1
@@ -213,11 +206,6 @@ class EVE(torch.optim.Optimizer):
 
                     m.mul_(beta1).add_(p.grad, alpha=1.0 - beta1)
                     v.mul_(beta2).addcmul_(p.grad, p.grad, value=1.0 - beta2)
-
-                    # Maintain slow momentum even at K=1 for readiness.
-                    state["m_slow"].mul_(beta1_slow).add_(
-                        p.grad, alpha=1.0 - beta1_slow
-                    )
 
                     bc1 = 1.0 - beta1 ** state["step"]
                     step_size = lr / bc1
@@ -258,7 +246,6 @@ class EVE(torch.optim.Optimizer):
         #     sync for every parameter (Fix Bug 1).
         for group in self.param_groups:
             beta1, beta2 = group["betas"]
-            beta1_slow = group["beta1_slow"]
 
             for p in group["params"]:
                 if p.grad is None:
@@ -275,9 +262,6 @@ class EVE(torch.optim.Optimizer):
                     state["v"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                    state["m_slow"] = torch.zeros_like(
-                        p, memory_format=torch.preserve_format
-                    )
                     state["s"] = torch.full_like(p, 0.5)
                     state["prev_update_sign"] = torch.zeros_like(p)
 
@@ -286,9 +270,6 @@ class EVE(torch.optim.Optimizer):
 
                 m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-                state["m_slow"].mul_(beta1_slow).add_(
-                    grad, alpha=1.0 - beta1_slow
-                )
 
                 bc2 = 1.0 - beta2 ** state["step"]
                 sqrt_v_hat = (v / bc2).sqrt()
@@ -306,9 +287,8 @@ class EVE(torch.optim.Optimizer):
             eps = group["eps"]
             grp_K = group["K"]
             beta1 = group["betas"][0]
-            beta1_slow_val = group["beta1_slow"]
             alpha_interp = group["alpha"]
-            sam_rho_val = group["sam_rho"]
+            sam_gamma_val = group["sam_gamma"]
             m, s = state["m"], state["s"]
 
             bc1 = 1.0 - beta1 ** state["step"]
@@ -318,25 +298,22 @@ class EVE(torch.optim.Optimizer):
 
             directions: List[Tensor] = []
 
-            # d1 — Adam / Baseline (Eq. 7)
+            # d1 -- Adam / Baseline (Eq. 7)
             d1 = m_hat.neg() / denom
             directions.append(d1)
 
             if grp_K >= 2:
-                # d2 — Slow Momentum (Eq. 8)
-                bc1_slow = 1.0 - beta1_slow_val ** state["step"]
-                m_hat_slow = state["m_slow"] / bc1_slow
-                directions.append(m_hat_slow.neg() / denom)
+                # d2 -- Sign Momentum: uniform-magnitude alternative to d1
+                directions.append(torch.sign(m_hat).neg() / denom)
 
             if grp_K >= 3:
-                # d3 — Interpolated Complementary (Eq. 9)
+                # d3 -- Interpolated Complementary (Eq. 9)
                 blended = alpha_interp * m_hat + (1.0 - alpha_interp) * grad
                 directions.append((blended.neg() * (1.0 - s)) / denom)
 
             if grp_K >= 4:
-                # d4 — Virtual SAM (Eq. 10)
-                gamma = sam_rho_val * group["lr"]
-                directions.append(d1 + gamma * grad.sign())
+                # d4 -- Virtual SAM perturbation (absolute scale)
+                directions.append(d1 + sam_gamma_val * grad.sign())
 
             # Extended offspring for K > 4
             if grp_K > 4:
