@@ -6,7 +6,7 @@ Faithful implementation of every equation in the EVE paper draft:
   - Probe-based fitness evaluation    (Eq. 14,    Section 4.2)
   - Soft natural selection            (Eq. 18,    Section 4.3)
   - EVE parameter update              (Eq. 20,    Section 4.3)
-  - Strength signal                   (Eq. 25,    Section 4.4)
+  - Strength signal via momentum-variance ratio   (Section 4.4)
   - Adaptive selection temperature    (Eq. 26,    Section 4.5)
 
 At K=1 the optimizer is *exactly* AdamW with zero overhead.
@@ -38,7 +38,6 @@ class EVE(torch.optim.Optimizer):
         eps: numerical stabiliser (epsilon).
         weight_decay: decoupled weight decay coefficient (lambda).
         K: brood size — number of offspring directions.
-        gamma_s: strength-signal decay rate.
         rho: target entropy ratio for adaptive temperature (0 = pure
             exploitation, 1 = pure exploration).
         alpha_beta: selection-temperature adaptation rate.
@@ -54,7 +53,6 @@ class EVE(torch.optim.Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0.01,
         K: int = 4,
-        gamma_s: float = 0.99,
         rho: float = 0.5,
         alpha_beta: float = 0.01,
         beta_sel_init: float = 1.0,
@@ -78,7 +76,6 @@ class EVE(torch.optim.Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             K=K,
-            gamma_s=gamma_s,
             rho=rho,
             alpha_beta=alpha_beta,
             beta_sel_init=beta_sel_init,
@@ -87,7 +84,6 @@ class EVE(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
         self.beta_sel: float = beta_sel_init
-        self._prev_loss: Optional[float] = None
         self._global_step: int = 0
         self.record_diagnostics: bool = record_diagnostics
         self._diagnostics: List[Dict[str, Any]] = []
@@ -168,7 +164,6 @@ class EVE(torch.optim.Optimizer):
                         state["v"] = torch.zeros_like(
                             p, memory_format=torch.preserve_format
                         )
-                        state["s"] = torch.full_like(p, 0.5)
 
                     state["step"] += 1
                     m, v = state["m"], state["v"]
@@ -189,18 +184,10 @@ class EVE(torch.optim.Optimizer):
 
         # ── K>1 path ─────────────────────────────────────────────────────
 
-        # Obtain current training loss for strength signal when no closure.
-        if current_loss is None and data is not None and model is not None:
-            inp, tgt = data
-            with torch.no_grad():
-                current_loss = loss_fn(model(self._unpack_input(inp)), tgt).item()
-
-        # ── Phase 1: strength-signal update (Eq. 25) ─────────────────────
-        self._update_strength_signal(current_loss)
-
         # ── Phase 2: moment updates + offspring construction ─────────────
         offspring_map: Dict[int, Tensor] = {}
         sqrt_v_hat_map: Dict[int, Tensor] = {}
+        s_map: Dict[int, Tensor] = {}
         ptr_to_lr: Dict[int, float] = {}
 
         # 2a. First pass — update moments, compute sqrt(v_hat), find global
@@ -226,8 +213,6 @@ class EVE(torch.optim.Optimizer):
                     state["v"] = torch.zeros_like(
                         p, memory_format=torch.preserve_format
                     )
-                    state["s"] = torch.full_like(p, 0.5)
-                    state["prev_update_sign"] = torch.zeros_like(p)
 
                 state["step"] += 1
                 m, v = state["m"], state["v"]
@@ -255,12 +240,17 @@ class EVE(torch.optim.Optimizer):
             eps = group["eps"]
             grp_K = group["K"]
             beta1 = group["betas"][0]
-            m, s = state["m"], state["s"]
+            m = state["m"]
 
             bc1 = 1.0 - beta1 ** state["step"]
             m_hat = m / bc1
             sqrt_v_hat = sqrt_v_hat_map[p.data_ptr()]
             denom = sqrt_v_hat + eps
+
+            # Strength signal: momentum-variance ratio (replaces Eq. 25)
+            ratio = m_hat.abs() / denom
+            s = torch.sigmoid(ratio - 1.0)
+            s_map[p.data_ptr()] = s
 
             directions: List[Tensor] = []
 
@@ -351,7 +341,7 @@ class EVE(torch.optim.Optimizer):
         # ── Diagnostics capture ──────────────────────────────────────────
         if self.record_diagnostics:
             self._record_step_diagnostics(
-                fitness, weights, offspring_map, params_with_grad,
+                fitness, weights, offspring_map, s_map, params_with_grad,
                 current_loss,
             )
 
@@ -360,16 +350,10 @@ class EVE(torch.optim.Optimizer):
             dir_stack = offspring_map[p.data_ptr()]
             lr = group["lr"]
             wd = group["weight_decay"]
-            state = self.state[p]
 
             combined = torch.einsum("k...,k->...", dir_stack, weights)
 
             with torch.no_grad():
-                if wd != 0.0:
-                    state["prev_update_sign"] = (combined - wd * p.data).sign()
-                else:
-                    state["prev_update_sign"] = combined.sign()
-
                 if wd != 0.0:
                     p.data.mul_(1.0 - lr * wd)
                 p.data.add_(combined, alpha=lr)
@@ -377,46 +361,7 @@ class EVE(torch.optim.Optimizer):
         # ── Phase 7: adaptive temperature (Eq. 26) ──────────────────────
         self._adapt_temperature(weights, K)
 
-        self._prev_loss = current_loss
         return loss
-
-    # ------------------------------------------------------------------
-    #  Strength signal  (Section 4.4, Eq. 25)
-    # ------------------------------------------------------------------
-
-    def _update_strength_signal(self, current_loss: Optional[float]) -> None:
-        """Update per-dimension strength signal s_t.
-
-        s_{t+1,d} = γ_s · s_{t,d}
-                   + (1 − γ_s) · σ(δ_t · sign(Δθ_{t,d}) · sign(−g_{t+1,d}))
-
-        where δ_t = L_prev − L_current (inter-step loss improvement),
-        Δθ is the previous step's displacement, and g_{t+1} is the
-        current gradient.
-        """
-        if self._prev_loss is None or current_loss is None:
-            return
-
-        delta_t: float = self._prev_loss - current_loss
-
-        for group in self.param_groups:
-            gamma_s: float = group["gamma_s"]
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                state = self.state[p]
-                if "s" not in state or "prev_update_sign" not in state:
-                    continue
-
-                s = state["s"]
-                prev_sign = state["prev_update_sign"]
-                neg_grad_sign = p.grad.neg().sign()
-
-                # Eq. 25: sigmoid(δ_t · sign(Δθ) · sign(−g_{t+1}))
-                raw = delta_t * prev_sign * neg_grad_sign
-                update_val = torch.sigmoid(raw)
-
-                s.mul_(gamma_s).add_(update_val, alpha=1.0 - gamma_s)
 
     # ------------------------------------------------------------------
     #  Adaptive selection temperature  (Section 4.5, Eq. 26)
@@ -453,6 +398,7 @@ class EVE(torch.optim.Optimizer):
         fitness: Tensor,
         weights: Tensor,
         offspring_map: Dict[int, Tensor],
+        s_map: Dict[int, Tensor],
         params_with_grad: List[Tuple[Dict, Tensor]],
         current_loss: Optional[float],
     ) -> None:
@@ -464,14 +410,14 @@ class EVE(torch.optim.Optimizer):
         all_s: List[Tensor] = []
 
         for _group, p in params_with_grad:
-            dirs = offspring_map[p.data_ptr()]
+            ptr = p.data_ptr()
+            dirs = offspring_map[ptr]
             for k in range(K):
                 flat_dirs[k].append(dirs[k].detach().reshape(-1))
             combined = torch.einsum("k...,k->...", dirs, weights)
             flat_combined.append(combined.detach().reshape(-1))
-            state = self.state[p]
-            if "s" in state:
-                all_s.append(state["s"].detach().reshape(-1))
+            if ptr in s_map:
+                all_s.append(s_map[ptr].detach().reshape(-1))
 
         dir_vecs = [torch.cat(fd).cpu() for fd in flat_dirs]
         combined_vec = torch.cat(flat_combined).cpu()

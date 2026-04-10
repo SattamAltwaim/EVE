@@ -350,43 +350,50 @@ class TestSelectionWeights:
 # ══════════════════════════════════════════════════════════════════════════
 
 class TestStrengthSignal:
+    """Strength signal is now computed inline as sigmoid(|m_hat|/denom - 1).
+    It is not stored in optimizer state; verify it via diagnostics."""
 
-    def test_stays_in_01(self):
-        """s must remain in [0, 1] since sigmoid ∈ (0,1) and EMA with
-        gamma_s ∈ [0,1)."""
+    def test_bounded_01(self):
+        """s = sigmoid(...) is always in (0, 1)."""
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
+
+        x = torch.randn(32, 8)
+        y = torch.randn(32, 4)
+        _train_steps(model, opt, x, y, 30, is_eve_k_gt1=True)
+
+        for diag in opt._diagnostics:
+            s_stats = diag["s_stats"]
+            assert s_stats["min"] >= 0.0 - 1e-7
+            assert s_stats["max"] <= 1.0 + 1e-7
+
+    def test_not_stored_in_state(self):
+        """s should NOT be in optimizer state (it is computed inline)."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=4)
 
-        x = torch.randn(32, 8)
-        y = torch.randn(32, 4)
-        _train_steps(model, opt, x, y, 50, is_eve_k_gt1=True)
+        x = torch.randn(16, 8)
+        y = torch.randn(16, 4)
+        _train_steps(model, opt, x, y, 5, is_eve_k_gt1=True)
 
         for p in model.parameters():
-            s = opt.state[p]["s"]
-            assert s.min().item() >= 0.0 - 1e-7
-            assert s.max().item() <= 1.0 + 1e-7
+            assert "s" not in opt.state[p]
+            assert "prev_update_sign" not in opt.state[p]
 
-    def test_initial_value(self):
-        """s should be initialised to 0.5 (neutral prior)."""
+    def test_heterogeneous_after_training(self):
+        """After several steps, s should not be uniform (std > 0)."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=1)
+        opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
 
-        x = torch.randn(8, 8)
-        y = torch.randn(8, 4)
+        x = torch.randn(32, 8)
+        y = torch.randn(32, 4)
+        _train_steps(model, opt, x, y, 30, is_eve_k_gt1=True)
 
-        # One step to initialise state
-        model.zero_grad()
-        F.mse_loss(model(x), y).backward()
-        opt.step()
-
-        for p in model.parameters():
-            s = opt.state[p]["s"]
-            # After one step with no prev_loss, s stays at 0.5
-            torch.testing.assert_close(
-                s, torch.full_like(s, 0.5), atol=1e-7, rtol=0
-            )
+        last = opt._diagnostics[-1]["s_stats"]
+        assert last["std"] > 0.01, f"s should be heterogeneous, got std={last['std']}"
 
 
 # ══════════════════════════════════════════════════════════════════════════
