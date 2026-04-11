@@ -310,6 +310,23 @@ class TestOffspring:
         d4 = -g.sign() * sqrt_v_hat / (global_max + eps)
         assert d4.abs().max().item() <= 1.0 + 1e-7
 
+    def test_offspring_norms_equalized(self):
+        """After normalization, all offspring should have the same global L2 norm."""
+        _seed()
+        model = _make_fc()
+        opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
+
+        x = torch.randn(32, 8)
+        y = torch.randn(32, 4)
+        _train_steps(model, opt, x, y, 10, is_eve_k_gt1=True)
+
+        for d in opt._diagnostics:
+            norms = d["dir_norms"]
+            for n in norms[1:]:
+                assert abs(n - norms[0]) / (norms[0] + 1e-12) < 0.01, (
+                    f"offspring norms should be equalized: {norms}"
+                )
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  5. Selection weights
