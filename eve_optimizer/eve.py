@@ -333,20 +333,26 @@ class EVE(torch.optim.Optimizer):
 
             offspring_map[p.data_ptr()] = torch.stack(directions)
 
-        # ── Phase 3: normalize d2 to d1's global L2 norm ─────────────────
-        #     d2 (raw gradient) overshoots because ‖d2‖ > ‖d1‖. Rescale d2
-        #     to match d1's norm so the probe compares direction, not magnitude.
-        if K >= 2:
-            d1_sq = torch.zeros(1, device=next(iter(sqrt_v_hat_map.values())).device)
-            d2_sq = torch.zeros(1, device=d1_sq.device)
+        # ── Phase 3: normalize d2 and d3 to d1's global L2 norm ──────────
+        #     d2/d3 can overshoot because their raw magnitudes differ from
+        #     d1's curvature-calibrated norm. Rescale so the probe compares
+        #     direction, not magnitude.
+        norm_indices = [k for k in (1, 2) if k < K]
+        if norm_indices:
+            dev = next(iter(sqrt_v_hat_map.values())).device
+            d1_sq = torch.zeros(1, device=dev)
+            dk_sqs = {k: torch.zeros(1, device=dev) for k in norm_indices}
             for _group, p in params_with_grad:
                 dirs = offspring_map[p.data_ptr()]
                 d1_sq = d1_sq + dirs[0].pow(2).sum()
-                d2_sq = d2_sq + dirs[1].pow(2).sum()
+                for k in norm_indices:
+                    dk_sqs[k] = dk_sqs[k] + dirs[k].pow(2).sum()
 
-            ratio = d1_sq.sqrt() / d2_sq.sqrt().clamp(min=1e-12)
-            for _group, p in params_with_grad:
-                offspring_map[p.data_ptr()][1].mul_(ratio)
+            d1_norm = d1_sq.sqrt()
+            for k in norm_indices:
+                ratio = d1_norm / dk_sqs[k].sqrt().clamp(min=1e-12)
+                for _group, p in params_with_grad:
+                    offspring_map[p.data_ptr()][k].mul_(ratio)
 
         # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
         #
