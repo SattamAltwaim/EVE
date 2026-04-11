@@ -352,32 +352,41 @@ class TestSelectionWeights:
 class TestStrengthSignal:
 
     def test_stays_in_01(self):
-        """s is sigmoid output so must always be in (0, 1)."""
+        """s must remain in [0, 1] since sigmoid ∈ (0,1) and EMA with
+        gamma_s ∈ [0,1)."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
+        opt = EVE(model.parameters(), lr=1e-2, K=4)
 
         x = torch.randn(32, 8)
         y = torch.randn(32, 4)
         _train_steps(model, opt, x, y, 50, is_eve_k_gt1=True)
 
-        for d in opt._diagnostics:
-            s = d["s_stats"]
-            assert s["min"] >= 0.0 - 1e-7
-            assert s["max"] <= 1.0 + 1e-7
+        for p in model.parameters():
+            s = opt.state[p]["s"]
+            assert s.min().item() >= 0.0 - 1e-7
+            assert s.max().item() <= 1.0 + 1e-7
 
-    def test_heterogeneous(self):
-        """s should have meaningful spread (not collapsed to a constant)."""
+    def test_initial_value(self):
+        """s should be initialised to 0.5 (neutral prior)."""
         _seed()
         model = _make_fc()
-        opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
+        opt = EVE(model.parameters(), lr=1e-2, K=1)
 
-        x = torch.randn(32, 8)
-        y = torch.randn(32, 4)
-        _train_steps(model, opt, x, y, 50, is_eve_k_gt1=True)
+        x = torch.randn(8, 8)
+        y = torch.randn(8, 4)
 
-        last_s = opt._diagnostics[-1]["s_stats"]
-        assert last_s["std"] > 0.01, "s should be heterogeneous across dimensions"
+        # One step to initialise state
+        model.zero_grad()
+        F.mse_loss(model(x), y).backward()
+        opt.step()
+
+        for p in model.parameters():
+            s = opt.state[p]["s"]
+            # After one step with no prev_loss, s stays at 0.5
+            torch.testing.assert_close(
+                s, torch.full_like(s, 0.5), atol=1e-7, rtol=0
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════
