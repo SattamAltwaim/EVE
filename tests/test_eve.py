@@ -310,8 +310,8 @@ class TestOffspring:
         d4 = -g.sign() * sqrt_v_hat / (global_max + eps)
         assert d4.abs().max().item() <= 1.0 + 1e-7
 
-    def test_offspring_norms_equalized(self):
-        """After normalization, all offspring should have the same global L2 norm."""
+    def test_d2_norm_matches_d1(self):
+        """After normalization, d2 should have the same global L2 norm as d1."""
         _seed()
         model = _make_fc()
         opt = EVE(model.parameters(), lr=1e-2, K=4, record_diagnostics=True)
@@ -322,10 +322,9 @@ class TestOffspring:
 
         for d in opt._diagnostics:
             norms = d["dir_norms"]
-            for n in norms[1:]:
-                assert abs(n - norms[0]) / (norms[0] + 1e-12) < 0.01, (
-                    f"offspring norms should be equalized: {norms}"
-                )
+            assert abs(norms[1] - norms[0]) / (norms[0] + 1e-12) < 0.01, (
+                f"d2 norm should match d1: d1={norms[0]:.6f}, d2={norms[1]:.6f}"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════

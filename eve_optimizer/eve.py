@@ -333,24 +333,20 @@ class EVE(torch.optim.Optimizer):
 
             offspring_map[p.data_ptr()] = torch.stack(directions)
 
-        # ── Phase 3: normalize offspring to d1's global L2 norm ───────────
-        #     Ensures the probe compares directional quality at a uniform
-        #     step size rather than conflating direction with magnitude.
-        global_sq_norms: List[Tensor] = [
-            torch.zeros(1, device=next(iter(sqrt_v_hat_map.values())).device)
-            for _ in range(K)
-        ]
-        for _group, p in params_with_grad:
-            dirs = offspring_map[p.data_ptr()]
-            for k in range(K):
-                global_sq_norms[k] = global_sq_norms[k] + dirs[k].pow(2).sum()
-
-        d1_norm = global_sq_norms[0].sqrt()
-        for k in range(1, K):
-            dk_norm = global_sq_norms[k].sqrt().clamp(min=1e-12)
-            ratio = d1_norm / dk_norm
+        # ── Phase 3: normalize d2 to d1's global L2 norm ─────────────────
+        #     d2 (raw gradient) overshoots because ‖d2‖ > ‖d1‖. Rescale d2
+        #     to match d1's norm so the probe compares direction, not magnitude.
+        if K >= 2:
+            d1_sq = torch.zeros(1, device=next(iter(sqrt_v_hat_map.values())).device)
+            d2_sq = torch.zeros(1, device=d1_sq.device)
             for _group, p in params_with_grad:
-                offspring_map[p.data_ptr()][k].mul_(ratio)
+                dirs = offspring_map[p.data_ptr()]
+                d1_sq = d1_sq + dirs[0].pow(2).sum()
+                d2_sq = d2_sq + dirs[1].pow(2).sum()
+
+            ratio = d1_sq.sqrt() / d2_sq.sqrt().clamp(min=1e-12)
+            for _group, p in params_with_grad:
+                offspring_map[p.data_ptr()][1].mul_(ratio)
 
         # ── Phase 4: probe-based fitness evaluation (Eq. 14) ─────────────
         #
