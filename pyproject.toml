@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "eve-optimizer"
+version = "0.2.0"
+description = "EVE: Evolutionary Virtual Exploration -- adaptive optimizer with next-batch probing."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+notebooks = [
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "scikit-learn>=1.2",
+    "tqdm>=4.60",
+    "pandas>=2.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["eve_optimizer*"]
